@@ -72,11 +72,22 @@ sudo find $WP_PATH -type d -exec chmod 755 {} \;
 sudo find $WP_PATH -type f -exec chmod 644 {} \;
 
 # -------------------
+# RESTORE DATABASE CREDENTIALS FROM wp-config.php
+# -------------------
+echo "[INFO] Extracting database credentials from wp-config.php..."
+DB_NAME=$(grep "define('DB_NAME'" $WP_CONFIG | cut -d"'" -f4)
+DB_USER=$(grep "define('DB_USER'" $WP_CONFIG | cut -d"'" -f4)
+DB_PASSWORD=$(grep "define('DB_PASSWORD'" $WP_CONFIG | cut -d"'" -f4)
+
+echo "[INFO] Using the following database credentials:"
+echo "Database Name: $DB_NAME"
+echo "Database User: $DB_USER"
+echo "Database Password: (hidden)"
+
+# -------------------
 # RESTORE DATABASE
 # -------------------
 echo "[INFO] Restoring database..."
-
-DB_NAME="wordpress_db"  # Adjust to match your WordPress database name in wp-config.php
 
 # If necessary, create the database (ensure the database exists in MySQL)
 sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
@@ -84,7 +95,7 @@ sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 # Import the existing database dump (if applicable)
 # This assumes the original database is running and doesn't require restoring from an external file
 # Adjust if you have an actual database dump to restore
-sudo mysql -u root -p $DB_NAME < /var/www/html/backup/wordpress_db.sql
+sudo mysql -u root -p$DB_PASSWORD $DB_NAME < /var/www/html/backup/wordpress_db.sql
 
 # -------------------
 # VERIFY wp-config.php
@@ -97,8 +108,8 @@ fi
 
 # Ensure wp-config.php points to the correct database
 sed -i "s/database_name_here/$DB_NAME/" $WP_CONFIG
-sed -i "s/username_here/wordpress_user/" $WP_CONFIG
-sed -i "s/password_here/wordpress_pass/" $WP_CONFIG
+sed -i "s/username_here/$DB_USER/" $WP_CONFIG
+sed -i "s/password_here/$DB_PASSWORD/" $WP_CONFIG
 
 # Update site URL if necessary
 sed -i "s|define('WP_HOME', 'http://localhost');|define('WP_HOME', 'https://$DOMAIN');|" $WP_CONFIG
