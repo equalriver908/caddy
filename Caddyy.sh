@@ -225,7 +225,6 @@ echo "[INFO] Setting up PHP-FPM..."
         php8.3-mbstring php8.3-xml php8.3-xmlrpc php8.3-soap php8.3-intl \
         php8.3-zip php8.3-bcmath
     PHP_VERSION="8.3"
-fi
 
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 echo "[INFO] Using PHP-FPM socket: $PHP_SOCKET"
