@@ -1,8 +1,7 @@
 #!/bin/bash
 # ===============================================
-# Full Migration Script: WordPress + PHP-FPM + Caddy
-# Migrates WordPress from Apache/Nginx to Caddy (same server, no backup needed)
-# Also changes the WordPress admin user to "Ahmed Saeed"
+# Migration Script: WordPress + PHP-FPM + Caddy
+# Migrates WordPress from Apache/Nginx to Caddy without changing the original login credentials
 # ===============================================
 
 set -e
@@ -12,14 +11,10 @@ set -e
 # -------------------
 DOMAIN="sahmcore.com.sa"
 ADMIN_EMAIL="a.saeed@$DOMAIN"
-WP_ADMIN_USER="Ahmed Saeed"  # New WordPress admin username
-WP_ADMIN_PASSWORD="Sahm2190"  # Admin password
-
-# Web Server details
-PHP_VERSION="8.3"
-PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 WP_PATH="/var/www/html"
 WP_CONFIG="$WP_PATH/wp-config.php"
+PHP_VERSION="8.3"
+PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 
 # -------------------
 # SYSTEM UPDATE & DEPENDENCIES
@@ -61,31 +56,42 @@ sudo systemctl disable apache2 nginx 2>/dev/null || true
 sudo systemctl mask apache2 nginx  # Ensure Apache and Nginx do not restart
 
 # -------------------
-# CREATE wp-config.php (if needed)
+# RESTORE WORDPRESS FILES
 # -------------------
-echo "[INFO] Creating and updating wp-config.php..."
+echo "[INFO] Restoring original WordPress files..."
+# Assuming the backup is already in place, for example, `/backup/wordpress`
+# Copy the backup contents to the new location
+sudo cp -R /backup/wordpress/* $WP_PATH/
+sudo chown -R www-data:www-data $WP_PATH
+sudo find $WP_PATH -type d -exec chmod 755 {} \;
+sudo find $WP_PATH -type f -exec chmod 644 {} \;
+
+# -------------------
+# RESTORE DATABASE
+# -------------------
+echo "[INFO] Restoring original database..."
+# Assuming the database dump is in `/backup/wordpress_db.sql`
+# Replace 'wordpress_db' with your actual WordPress database name
+sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS wordpress_db;"
+sudo mysql -u root -p wordpress_db < /backup/wordpress_db.sql
+
+# -------------------
+# VERIFY wp-config.php
+# -------------------
+echo "[INFO] Verifying wp-config.php..."
 if [ ! -f "$WP_CONFIG" ]; then
-    cp "$WP_PATH/wp-config-sample.php" "$WP_CONFIG"
-    sed -i "s/database_name_here/wordpress/" $WP_CONFIG
-    sed -i "s/username_here/wordpress_user/" $WP_CONFIG
-    sed -i "s/password_here/wordpress_pass/" $WP_CONFIG
+    echo "[ERROR] wp-config.php is missing!"
+    exit 1
 fi
 
-# Update the site URL (optional, if domain changed)
+# Ensure wp-config.php points to the correct database
+sed -i "s/database_name_here/wordpress_db/" $WP_CONFIG
+sed -i "s/username_here/wordpress_user/" $WP_CONFIG
+sed -i "s/password_here/wordpress_pass/" $WP_CONFIG
+
+# Update site URL if necessary
 sed -i "s|define('WP_HOME', 'http://localhost');|define('WP_HOME', 'https://$DOMAIN');|" $WP_CONFIG
 sed -i "s|define('WP_SITEURL', 'http://localhost');|define('WP_SITEURL', 'https://$DOMAIN');|" $WP_CONFIG
-
-# -------------------
-# UPDATE ADMIN USER IN DATABASE
-# -------------------
-echo "[INFO] Updating WordPress admin user to 'Ahmed Saeed' in the database..."
-
-# Update the admin username and email in the database
-sudo mysql -u root -p -e "
-USE wordpress;
-UPDATE wp_users SET user_login = 'Ahmed Saeed', user_email = '$ADMIN_EMAIL' WHERE user_login = 'admin';
-UPDATE wp_usermeta SET meta_value = 'Ahmed Saeed' WHERE user_id = (SELECT ID FROM wp_users WHERE user_login = 'Ahmed Saeed') AND meta_key = 'nickname';
-"
 
 # -------------------
 # CREATE CADDYFILE
@@ -217,37 +223,5 @@ else
     sudo systemctl enable php${PHP_VERSION}-fpm
 fi
 
-# Check if Caddy is running
-echo "[INFO] Checking if Caddy is running..."
-if systemctl is-active --quiet caddy; then
-    echo "[INFO] Caddy is running."
-else
-    echo "[ERROR] Caddy is NOT running. Starting Caddy..."
-    sudo systemctl start caddy
-    sudo systemctl enable caddy
-fi
+# Check if Caddy is
 
-# Perform Health Check (Curl)
-echo "[INFO] Performing basic health check for WordPress..."
-curl -s --head "https://$DOMAIN" | head -n 20
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
-if [ "$HTTP_STATUS" -eq 200 ]; then
-    echo "[INFO] WordPress is responsive (status code 200)."
-else
-    echo "[ERROR] WordPress is not responsive (status code: $HTTP_STATUS)."
-    exit 1
-fi
-
-# -------------------
-# Final Status
-# -------------------
-echo ""
-echo "==============================================="
-echo "Migration Complete!"
-echo "WordPress: https://$DOMAIN"
-echo "ERP: https://erp.$DOMAIN"
-echo "Docs: https://docs.$DOMAIN"
-echo "Mail: https://mail.$DOMAIN"
-echo "Nomogrow: https://nomogrow.$DOMAIN"
-echo "Ventura-Tech: https://ventura-tech.$DOMAIN"
-echo "==============================================="
