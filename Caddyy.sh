@@ -204,16 +204,16 @@ sudo apt install -y curl wget unzip lsb-release software-properties-common \
 echo "[INFO] Setting up PHP-FPM..."
 
 # Check existing PHP version
-EXISTING_PHP_VERSION=""
-if command -v php >/dev/null 2>&1; then
-    EXISTING_PHP_VERSION=$(php -r "echo PHP_MAJOR_VERSION;")
-    echo "[INFO] Found existing PHP $EXISTING_PHP_VERSION"
+#EXISTING_PHP_VERSION=""
+#if command -v php >/dev/null 2>&1; then
+   # EXISTING_PHP_VERSION=$(php -r "echo PHP_MAJOR_VERSION;")
+ #   echo "[INFO] Found existing PHP $EXISTING_PHP_VERSION"
     
     # Check if PHP-FPM is installed
-    if ! systemctl list-unit-files | grep -q php; then
-        echo "[INFO] Installing PHP-FPM for existing PHP version..."
-        sudo apt install -y "php$EXISTING_PHP_VERSION-fpm"
-    fi
+  #  if ! systemctl list-unit-files | grep -q php; then
+   #     echo "[INFO] Installing PHP-FPM for existing PHP version..."
+   #     sudo apt install -y "php$EXISTING_PHP_VERSION-fpm"
+   # fi
     
     PHP_VERSION="$EXISTING_PHP_VERSION"
 else
