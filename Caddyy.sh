@@ -98,26 +98,6 @@ echo "==============================================="
 echo " BACKUP EXISTING CONFIGURATION"
 echo "==============================================="
 
-BACKUP_DIR="/root/webserver-backup-$(date +%Y%m%d-%H%M%S)"
-sudo mkdir -p "$BACKUP_DIR"
-echo "[INFO] Backup directory: $BACKUP_DIR"
-
-# Backup web server configuration
-if [ "$WEB_SERVER" = "apache" ]; then
-    echo "[INFO] Backing up Apache configuration..."
-    sudo cp -r /etc/apache2 "$BACKUP_DIR/apache2" 2>/dev/null || true
-    sudo cp /etc/apache2/sites-available/*.conf "$BACKUP_DIR/" 2>/dev/null || true
-elif [ "$WEB_SERVER" = "nginx" ]; then
-    echo "[INFO] Backing up Nginx configuration..."
-    sudo cp -r /etc/nginx "$BACKUP_DIR/nginx" 2>/dev/null || true
-    sudo cp /etc/nginx/sites-available/* "$BACKUP_DIR/" 2>/dev/null || true
-fi
-
-# Backup WordPress files
-if [ "$EXISTING_WP" = true ]; then
-    echo "[INFO] Backing up WordPress files..."
-    sudo tar -czf "$BACKUP_DIR/wordpress-files.tar.gz" -C "$(dirname "$SELECTED_WP_PATH")" "$(basename "$SELECTED_WP_PATH")" 2>/dev/null || true
-fi
 
 # Extract database info from existing WordPress
 if [ "$EXISTING_WP" = true ] && [ -f "$SELECTED_WP_PATH/wp-config.php" ]; then
