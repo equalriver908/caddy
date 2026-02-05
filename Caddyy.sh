@@ -21,9 +21,7 @@ echo "==============================================="
 STATIC_IP="192.168.116.37"
 DOMAIN="sahmcore.com.sa"
 ADMIN_EMAIL="a.saeed@$DOMAIN"
-GATEWAY="192.168.116.1"
-NETMASK="255.255.255.0"
-DNS_SERVERS="8.8.8.8 8.8.4.4"
+
 
 # Detect primary network interface
 PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
