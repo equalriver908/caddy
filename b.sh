@@ -89,13 +89,16 @@ echo "Database Password: (hidden)"
 # -------------------
 echo "[INFO] Restoring database..."
 
+# Set MYSQL_PWD to avoid interactive password prompt
+export MYSQL_PWD=$DB_PASSWORD
+
 # If necessary, create the database (ensure the database exists in MySQL)
-sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 
 # Import the existing database dump (if applicable)
 # This assumes the original database is running and doesn't require restoring from an external file
 # Adjust if you have an actual database dump to restore
-sudo mysql -u root -p$DB_PASSWORD $DB_NAME < /var/www/html/backup/wordpress_db.sql
+sudo mysql -u root $DB_NAME < /var/www/html/backup/wordpress_db.sql
 
 # -------------------
 # VERIFY wp-config.php
@@ -230,26 +233,4 @@ else
 fi
 
 # Check if PHP-FPM is running
-echo "[INFO] Checking if PHP-FPM is running..."
-if systemctl is-active --quiet php${PHP_VERSION}-fpm; then
-    echo "[INFO] PHP-FPM is running."
-else
-    echo "[ERROR] PHP-FPM is NOT running. Starting PHP-FPM..."
-    sudo systemctl start php${PHP_VERSION}-fpm
-    sudo systemctl enable php${PHP_VERSION}-fpm
-fi
-
-# Check if Caddy is running
-echo "[INFO] Checking if Caddy is running..."
-if systemctl is-active --quiet caddy; then
-    echo "[INFO] Caddy is running."
-else
-    echo "[ERROR] Caddy is NOT running. Starting Caddy..."
-    sudo systemctl start caddy
-    sudo systemctl enable caddy
-fi
-
-# -------------------
-# COMPLETION
-# -------------------
-echo "[INFO] Migration complete. The WordPress site should now be available at https://$DOMAIN"
+echo "[INFO] Checking if PHP-FPM is
