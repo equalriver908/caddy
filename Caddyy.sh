@@ -216,7 +216,7 @@ echo "[INFO] Setting up PHP-FPM..."
    # fi
     
     PHP_VERSION="$EXISTING_PHP_VERSION"
-else
+ #else
     # Install PHP 8.3
     echo "[INFO] Installing PHP 8.3 with FPM..."
     sudo add-apt-repository ppa:ondrej/php -y
