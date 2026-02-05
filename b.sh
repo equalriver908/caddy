@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===============================================
 # Migration Script: WordPress + PHP-FPM + Caddy
-# Migrates WordPress from Apache/Nginx to Caddy without changing the original login credentials
+# Migrates WordPress from Apache/Nginx to Caddy with Let's Encrypt SSL
 # ===============================================
 
 set -e
@@ -11,10 +11,10 @@ set -e
 # -------------------
 DOMAIN="sahmcore.com.sa"
 ADMIN_EMAIL="a.saeed@$DOMAIN"
-WP_PATH="/var/www/html"
-WP_CONFIG="$WP_PATH/wp-config.php"
+WP_PATH="/var/www/html"          # The original WordPress path (no backup needed)
 PHP_VERSION="8.3"
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
+WP_CONFIG="$WP_PATH/wp-config.php"
 
 # -------------------
 # SYSTEM UPDATE & DEPENDENCIES
@@ -56,12 +56,17 @@ sudo systemctl disable apache2 nginx 2>/dev/null || true
 sudo systemctl mask apache2 nginx  # Ensure Apache and Nginx do not restart
 
 # -------------------
-# RESTORE WORDPRESS FILES
+# VERIFY AND RESTORE WORDPRESS FILES
 # -------------------
-echo "[INFO] Restoring original WordPress files..."
-# Assuming the backup is already in place, for example, `/backup/wordpress`
-# Copy the backup contents to the new location
-sudo cp -R /backup/wordpress/* $WP_PATH/
+echo "[INFO] Verifying WordPress installation at $WP_PATH..."
+
+# Ensure that the WordPress path exists
+if [ ! -d "$WP_PATH" ]; then
+    echo "[ERROR] WordPress path $WP_PATH does not exist!"
+    exit 1
+fi
+
+# Ensure correct permissions for the WordPress files
 sudo chown -R www-data:www-data $WP_PATH
 sudo find $WP_PATH -type d -exec chmod 755 {} \;
 sudo find $WP_PATH -type f -exec chmod 644 {} \;
@@ -69,11 +74,17 @@ sudo find $WP_PATH -type f -exec chmod 644 {} \;
 # -------------------
 # RESTORE DATABASE
 # -------------------
-echo "[INFO] Restoring original database..."
-# Assuming the database dump is in `/backup/wordpress_db.sql`
-# Replace 'wordpress_db' with your actual WordPress database name
-sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS wordpress_db;"
-sudo mysql -u root -p wordpress_db < /backup/wordpress_db.sql
+echo "[INFO] Restoring database..."
+
+DB_NAME="wordpress_db"  # Adjust to match your WordPress database name in wp-config.php
+
+# If necessary, create the database (ensure the database exists in MySQL)
+sudo mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
+
+# Import the existing database dump (if applicable)
+# This assumes the original database is running and doesn't require restoring from an external file
+# Adjust if you have an actual database dump to restore
+sudo mysql -u root -p $DB_NAME < /var/www/html/backup/wordpress_db.sql
 
 # -------------------
 # VERIFY wp-config.php
@@ -85,7 +96,7 @@ if [ ! -f "$WP_CONFIG" ]; then
 fi
 
 # Ensure wp-config.php points to the correct database
-sed -i "s/database_name_here/wordpress_db/" $WP_CONFIG
+sed -i "s/database_name_here/$DB_NAME/" $WP_CONFIG
 sed -i "s/username_here/wordpress_user/" $WP_CONFIG
 sed -i "s/password_here/wordpress_pass/" $WP_CONFIG
 
@@ -100,7 +111,7 @@ echo "[INFO] Creating Caddyfile..."
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
 # WordPress site $DOMAIN, www.$DOMAIN
 $DOMAIN, www.$DOMAIN {
-    root * /var/www/html
+    root * $WP_PATH
     php_fastcgi unix:$PHP_SOCKET
     file_server
     encode gzip zstd
@@ -113,6 +124,8 @@ $DOMAIN, www.$DOMAIN {
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
     }
+    # Automatically get SSL certificates from Let's Encrypt
+    tls $ADMIN_EMAIL
 }
 
 # ERP
@@ -170,16 +183,8 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp
 sudo ufw allow 80/tcp    # Allow HTTP for debugging
-sudo ufw allow 443/tcp
+sudo ufw allow 443/tcp   # Allow HTTPS for Let's Encrypt
 sudo ufw enable
-
-# -------------------
-# PERMISSIONS
-# -------------------
-echo "[INFO] Setting file permissions..."
-sudo chown -R www-data:www-data $WP_PATH
-sudo find $WP_PATH -type d -exec chmod 755 {} \;
-sudo find $WP_PATH -type f -exec chmod 644 {} \;
 
 # -------------------
 # START SERVICES
@@ -223,5 +228,17 @@ else
     sudo systemctl enable php${PHP_VERSION}-fpm
 fi
 
-# Check if Caddy is
+# Check if Caddy is running
+echo "[INFO] Checking if Caddy is running..."
+if systemctl is-active --quiet caddy; then
+    echo "[INFO] Caddy is running."
+else
+    echo "[ERROR] Caddy is NOT running. Starting Caddy..."
+    sudo systemctl start caddy
+    sudo systemctl enable caddy
+fi
 
+# -------------------
+# COMPLETION
+# -------------------
+echo "[INFO] Migration complete. The WordPress site should now be available at https://$DOMAIN"
