@@ -24,7 +24,7 @@ MAIL_IP="192.168.116.1"
 MAIL_PORT="444"
 NOMOGROW_IP="192.168.116.48"
 NOMOGROW_PORT="8082"
-VENTURA_IP="192.168.116.48"
+VENTURA_IP="192.168.116.10"  # Updated Ventura IP
 VENTURA_PORT="8080"
 
 # -------------------
@@ -50,6 +50,8 @@ else
 fi
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 echo "[INFO] Using PHP-FPM socket: $PHP_SOCKET"
+sudo systemctl restart php8.3-fpm
+sudo systemctl enable --now php8.3-fpm
 
 # -------------------
 # CADDY INSTALLATION
@@ -203,6 +205,9 @@ http://$DOMAIN, http://www.$DOMAIN, http://erp.$DOMAIN, http://docs.$DOMAIN, htt
 }
 EOF
 
+# Reload Caddy
+sudo systemctl reload caddy
+
 # -------------------
 # FIREWALL SETUP
 # -------------------
@@ -220,72 +225,45 @@ sudo ufw enable
 sudo chown -R www-data:www-data $WP_PATH
 sudo find $WP_PATH -type d -exec chmod 755 {} \;
 sudo find $WP_PATH -type f -exec chmod 644 {} \;
+sudo chown www-data:www-data /run/php/php${PHP_VERSION}-fpm.sock
+sudo chmod 660 /run/php/php${PHP_VERSION}-fpm.sock
+
+# -------------------
+# CREATE test.php
+# -------------------
+echo "[INFO] Creating test.php for PHP test..."
+echo "<?php phpinfo(); ?>" | sudo tee $WP_PATH/test.php
 
 # -------------------
 # START SERVICES
 # -------------------
 sudo systemctl daemon-reload
+sudo systemctl restart php${PHP_VERSION}-fpm
 sudo systemctl enable --now php${PHP_VERSION}-fpm
+sudo systemctl restart caddy
 sudo systemctl enable --now caddy
 
-echo ""
-echo "==============================================="
-echo "SETUP COMPLETE!"
-echo "WordPress: https://$DOMAIN"
-echo "ERP: https://erp.$DOMAIN"
-echo "Docs: https://docs.$DOMAIN"
-echo "Mail: https://mail.$DOMAIN"
-echo "Nomogrow: https://nomogrow.$DOMAIN"
-echo "Ventura-Tech: https://ventura-tech.$DOMAIN"
-echo "WordPress default admin: $WP_ADMIN_USER / $WP_ADMIN_PASSWORD"
-echo "Caddy + HTTPS is fully functional."
-echo "==============================================="
-
 # -------------------
-# DIAGNOSTIC SCRIPT STARTS HERE
+# HEALTH CHECKS
 # -------------------
-echo "[INFO] Starting WordPress + PHP-FPM Diagnostic Check..."
-# --- Configuration ---
-PHP_FPM_SERVICE="php${PHP_VERSION}-fpm"
-CADDY_SERVICE="caddy"
-
-# Check for Apache and Nginx conflicts
-echo "[INFO] Checking if Apache or Nginx are running..."
-if systemctl is-active --quiet apache2; then
-    echo "[ERROR] Apache is running. Stopping and disabling..."
-    sudo systemctl stop apache2
-    sudo systemctl disable apache2
-    sudo systemctl mask apache2
-else
-    echo "[INFO] Apache is not running."
-fi
-if systemctl is-active --quiet nginx; then
-    echo "[ERROR] Nginx is running. Stopping and disabling..."
-    sudo systemctl stop nginx
-    sudo systemctl disable nginx
-    sudo systemctl mask nginx
-else
-    echo "[INFO] Nginx is not running."
-fi
+echo "[INFO] Starting health checks..."
 
 # Check if PHP-FPM is running
-echo "[INFO] Checking if PHP-FPM is running..."
-if systemctl is-active --quiet $PHP_FPM_SERVICE; then
+if systemctl is-active --quiet php${PHP_VERSION}-fpm; then
     echo "[INFO] PHP-FPM is running."
 else
-    echo "[ERROR] PHP-FPM is NOT running. Starting PHP-FPM..."
-    sudo systemctl start $PHP_FPM_SERVICE
-    sudo systemctl enable $PHP_FPM_SERVICE
+    echo "[ERROR] PHP-FPM is NOT running. Attempting to start..."
+    sudo systemctl start php${PHP_VERSION}-fpm
+    sudo systemctl enable --now php${PHP_VERSION}-fpm
 fi
 
 # Check if Caddy is running
-echo "[INFO] Checking if Caddy is running..."
-if systemctl is-active --quiet $CADDY_SERVICE; then
+if systemctl is-active --quiet caddy; then
     echo "[INFO] Caddy is running."
 else
-    echo "[ERROR] Caddy is NOT running. Starting Caddy..."
-    sudo systemctl start $CADDY_SERVICE
-    sudo systemctl enable $CADDY_SERVICE
+    echo "[ERROR] Caddy is NOT running. Attempting to start..."
+    sudo systemctl start caddy
+    sudo systemctl enable --now caddy
 fi
 
 # Check WordPress directory
@@ -295,13 +273,6 @@ if [ ! -d "$WP_PATH" ]; then
     exit 1
 else
     echo "[INFO] WordPress directory exists."
-fi
-
-# Check wp-config.php
-if [ ! -f "$WP_PATH/wp-config.php" ]; then
-    echo "[ERROR] wp-config.php is missing!"
-else
-    echo "[INFO] wp-config.php found."
 fi
 
 # Check PHP-FPM socket
