@@ -116,20 +116,6 @@ if [ "$EXISTING_WP" = true ] && [ -f "$SELECTED_WP_PATH/wp-config.php" ]; then
         echo "  User: $DB_USER"
         echo "  Host: $DB_HOST"
         
-        # Backup database
-        echo "[INFO] Backing up WordPress database..."
-        if command -v mysqldump >/dev/null 2>&1; then
-            if mysqldump -u "$DB_USER" -p"$DB_PASSWORD" -h "$DB_HOST" "$DB_NAME" > "$BACKUP_DIR/wordpress-database.sql" 2>/dev/null; then
-                echo "[SUCCESS] Database backed up successfully"
-            else
-                echo "[WARNING] Could not backup database. Will try with root access..."
-                # Try with root if available
-                if mysql -u root -e "SHOW DATABASES LIKE '$DB_NAME';" | grep -q "$DB_NAME"; then
-                    mysqldump -u root "$DB_NAME" > "$BACKUP_DIR/wordpress-database.sql" 2>/dev/null && \
-                    echo "[SUCCESS] Database backed up using root access"
-                fi
-            fi
-        fi
         
         # Save database info
         echo "DB_NAME=$DB_NAME" > "$BACKUP_DIR/database.info"
