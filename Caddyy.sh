@@ -99,7 +99,7 @@ echo " BACKUP EXISTING CONFIGURATION"
 echo "==============================================="
 
 BACKUP_DIR="/root/webserver-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$BACKUP_DIR"
+sudo mkdir -p "$BACKUP_DIR"
 echo "[INFO] Backup directory: $BACKUP_DIR"
 
 # Backup web server configuration
