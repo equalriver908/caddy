@@ -117,12 +117,8 @@ if [ "$EXISTING_WP" = true ] && [ -f "$SELECTED_WP_PATH/wp-config.php" ]; then
         echo "  Host: $DB_HOST"
         
         
-        # Save database info
-        echo "DB_NAME=$DB_NAME" > "$BACKUP_DIR/database.info"
-        echo "DB_USER=$DB_USER" >> "$BACKUP_DIR/database.info"
-        echo "DB_PASSWORD=$DB_PASSWORD" >> "$BACKUP_DIR/database.info"
-        echo "DB_HOST=$DB_HOST" >> "$BACKUP_DIR/database.info"
-        
+
+
         # Get WordPress site URL from database
         echo "[INFO] Getting WordPress site URL..."
         if command -v wp >/dev/null 2>&1; then
