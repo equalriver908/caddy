@@ -1,45 +1,195 @@
 #!/bin/bash
 # ===============================================
-# Full Setup Script: WordPress + PHP-FPM + Caddy + Let's Encrypt
-# Enhanced with failsafe database handling and website selection
+# WordPress Migration Script: Apache/Nginx → Caddy
+# Preserves existing websites and databases
+# Automatically migrates configuration
 # Domain: sahmcore.com.sa
 # ===============================================
 
 set -e
 
 # -------------------
-# CLEANUP PREVIOUS BACKUPS AND FREE DISK SPACE
+# DETECTION PHASE
 # -------------------
 
-echo "[INFO] Cleaning up previous backups and freeing up disk space..."
+echo "==============================================="
+echo " WORDPRESS MIGRATION & CADDY SETUP"
+echo " Detecting existing configuration..."
+echo "==============================================="
 
-# Remove temporary files in /tmp (keep recent files)
-echo "[INFO] Cleaning /tmp directory..."
-find /tmp -type f -atime +1 -delete 2>/dev/null || true
+# Detect existing web server
+WEB_SERVER="none"
+if systemctl is-active --quiet apache2; then
+    WEB_SERVER="apache"
+    echo "[INFO] Detected running Apache web server"
+elif systemctl is-active --quiet nginx; then
+    WEB_SERVER="nginx"
+    echo "[INFO] Detected running Nginx web server"
+else
+    echo "[INFO] No active web server detected"
+fi
 
-# Remove old backups
-echo "[INFO] Removing old backup directories..."
-find /root/backup-* -maxdepth 0 -type d -mtime +7 -exec rm -rf {} \; 2>/dev/null || true
+# Detect WordPress installations
+echo ""
+echo "[INFO] Searching for WordPress installations..."
+WP_INSTALLATIONS=()
 
-# Clean package cache
-echo "[INFO] Cleaning up package cache..."
-sudo apt-get clean
+# Common WordPress locations to check
+WP_LOCATIONS=(
+    "/var/www/html"
+    "/var/www"
+    "/home/*/public_html"
+    "/home/*/www"
+    "/usr/share/nginx/html"
+    "/srv/www"
+)
 
-# Remove unnecessary packages
-echo "[INFO] Removing unnecessary packages..."
-sudo apt-get autoremove -y --purge
+for location in "${WP_LOCATIONS[@]}"; do
+    for dir in $(ls -d $location 2>/dev/null || true); do
+        if [ -f "$dir/wp-config.php" ]; then
+            WP_INSTALLATIONS+=("$dir")
+            echo "  ✓ Found: $dir"
+        fi
+    done
+done
 
-# Check disk usage
-echo "[INFO] Checking disk usage..."
-df -h
+if [ ${#WP_INSTALLATIONS[@]} -eq 0 ]; then
+    echo "[INFO] No WordPress installations found"
+    SELECTED_WP_PATH="/var/www/html"
+    EXISTING_WP=false
+else
+    echo ""
+    echo "==============================================="
+    echo " SELECT WORDPRESS INSTALLATION"
+    echo "==============================================="
+    
+    for i in "${!WP_INSTALLATIONS[@]}"; do
+        echo "$((i+1))) ${WP_INSTALLATIONS[$i]}"
+    done
+    echo "$(( ${#WP_INSTALLATIONS[@]} + 1 ))) Install fresh WordPress"
+    echo ""
+    
+    while true; do
+        read -p "Select installation (1-$((${#WP_INALLATIONS[@]} + 1))): " wp_choice
+        if [[ "$wp_choice" =~ ^[0-9]+$ ]] && [ "$wp_choice" -ge 1 ] && [ "$wp_choice" -le $((${#WP_INSTALLATIONS[@]} + 1)) ]; then
+            if [ "$wp_choice" -le ${#WP_INSTALLATIONS[@]} ]; then
+                SELECTED_WP_PATH="${WP_INSTALLATIONS[$((wp_choice-1))]}"
+                EXISTING_WP=true
+                echo "[INFO] Selected existing WordPress: $SELECTED_WP_PATH"
+            else
+                read -p "Enter path for new WordPress [/var/www/html]: " new_path
+                SELECTED_WP_PATH="${new_path:-/var/www/html}"
+                EXISTING_WP=false
+                echo "[INFO] Will install fresh WordPress to: $SELECTED_WP_PATH"
+            fi
+            break
+        else
+            echo "Invalid selection. Please enter a number between 1 and $((${#WP_INSTALLATIONS[@]} + 1))"
+        fi
+    done
+fi
 
 # -------------------
-# USER CONFIGURATION
+# BACKUP EXISTING CONFIGURATION
 # -------------------
-DOMAIN="sahmcore.com.sa"
+
+echo ""
+echo "==============================================="
+echo " BACKUP EXISTING CONFIGURATION"
+echo "==============================================="
+
+BACKUP_DIR="/root/webserver-backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+echo "[INFO] Backup directory: $BACKUP_DIR"
+
+# Backup web server configuration
+if [ "$WEB_SERVER" = "apache" ]; then
+    echo "[INFO] Backing up Apache configuration..."
+    sudo cp -r /etc/apache2 "$BACKUP_DIR/apache2" 2>/dev/null || true
+    sudo cp /etc/apache2/sites-available/*.conf "$BACKUP_DIR/" 2>/dev/null || true
+elif [ "$WEB_SERVER" = "nginx" ]; then
+    echo "[INFO] Backing up Nginx configuration..."
+    sudo cp -r /etc/nginx "$BACKUP_DIR/nginx" 2>/dev/null || true
+    sudo cp /etc/nginx/sites-available/* "$BACKUP_DIR/" 2>/dev/null || true
+fi
+
+# Backup WordPress files
+if [ "$EXISTING_WP" = true ]; then
+    echo "[INFO] Backing up WordPress files..."
+    sudo tar -czf "$BACKUP_DIR/wordpress-files.tar.gz" -C "$(dirname "$SELECTED_WP_PATH")" "$(basename "$SELECTED_WP_PATH")" 2>/dev/null || true
+fi
+
+# Extract database info from existing WordPress
+if [ "$EXISTING_WP" = true ] && [ -f "$SELECTED_WP_PATH/wp-config.php" ]; then
+    echo "[INFO] Extracting database information..."
+    
+    # Extract from wp-config.php
+    DB_NAME=$(grep -i "DB_NAME" "$SELECTED_WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | sed -e "s/.*['\"]\([^'\"]*\)['\"].*/\1/" | head -1)
+    DB_USER=$(grep -i "DB_USER" "$SELECTED_WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | sed -e "s/.*['\"]\([^'\"]*\)['\"].*/\1/" | head -1)
+    DB_PASSWORD=$(grep -i "DB_PASSWORD" "$SELECTED_WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | sed -e "s/.*['\"]\([^'\"]*\)['\"].*/\1/" | head -1)
+    DB_HOST=$(grep -i "DB_HOST" "$SELECTED_WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | sed -e "s/.*['\"]\([^'\"]*\)['\"].*/\1/" | head -1)
+    DB_HOST="${DB_HOST:-localhost}"
+    
+    if [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
+        echo "[INFO] Found existing WordPress database:"
+        echo "  Database: $DB_NAME"
+        echo "  User: $DB_USER"
+        echo "  Host: $DB_HOST"
+        
+        # Backup database
+        echo "[INFO] Backing up WordPress database..."
+        if command -v mysqldump >/dev/null 2>&1; then
+            if mysqldump -u "$DB_USER" -p"$DB_PASSWORD" -h "$DB_HOST" "$DB_NAME" > "$BACKUP_DIR/wordpress-database.sql" 2>/dev/null; then
+                echo "[SUCCESS] Database backed up successfully"
+            else
+                echo "[WARNING] Could not backup database. Will try with root access..."
+                # Try with root if available
+                if mysql -u root -e "SHOW DATABASES LIKE '$DB_NAME';" | grep -q "$DB_NAME"; then
+                    mysqldump -u root "$DB_NAME" > "$BACKUP_DIR/wordpress-database.sql" 2>/dev/null && \
+                    echo "[SUCCESS] Database backed up using root access"
+                fi
+            fi
+        fi
+        
+        # Save database info
+        echo "DB_NAME=$DB_NAME" > "$BACKUP_DIR/database.info"
+        echo "DB_USER=$DB_USER" >> "$BACKUP_DIR/database.info"
+        echo "DB_PASSWORD=$DB_PASSWORD" >> "$BACKUP_DIR/database.info"
+        echo "DB_HOST=$DB_HOST" >> "$BACKUP_DIR/database.info"
+        
+        # Get WordPress site URL from database
+        echo "[INFO] Getting WordPress site URL..."
+        if command -v wp >/dev/null 2>&1; then
+            SITE_URL=$(cd "$SELECTED_WP_PATH" && sudo -u www-data wp option get home 2>/dev/null || echo "")
+        else
+            # Try to extract directly from database
+            if mysql -u "$DB_USER" -p"$DB_PASSWORD" -h "$DB_HOST" -D "$DB_NAME" -sN -e "SELECT option_value FROM wp_options WHERE option_name = 'home' LIMIT 1;" 2>/dev/null; then
+                SITE_URL=$(mysql -u "$DB_USER" -p"$DB_PASSWORD" -h "$DB_HOST" -D "$DB_NAME" -sN -e "SELECT option_value FROM wp_options WHERE option_name = 'home' LIMIT 1;" 2>/dev/null)
+            fi
+        fi
+        
+        if [ -n "$SITE_URL" ]; then
+            echo "[INFO] Current WordPress URL: $SITE_URL"
+            DOMAIN=$(echo "$SITE_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|^www\.||')
+            echo "[INFO] Extracted domain: $DOMAIN"
+        else
+            # Ask for domain
+            read -p "Enter domain for WordPress [$DOMAIN]: " user_domain
+            DOMAIN="${user_domain:-$DOMAIN}"
+        fi
+    fi
+fi
+
+# If no domain determined yet
+if [ -z "$DOMAIN" ]; then
+    DOMAIN="sahmcore.com.sa"
+    read -p "Enter primary domain [$DOMAIN]: " user_domain
+    DOMAIN="${user_domain:-$DOMAIN}"
+fi
+
 ADMIN_EMAIL="a.saeed@$DOMAIN"
 
-# Internal VM IPs
+# Internal VM IPs (configure as needed)
 THIS_VM_IP="192.168.116.37"
 ERP_IP="192.168.116.13"
 ERP_PORT="8069"
@@ -52,356 +202,95 @@ NOMOGROW_PORT="8082"
 VENTURA_IP="192.168.116.10"
 VENTURA_PORT="8080"
 
-# -------------------
-# DETECT EXISTING WORDPRESS INSTALLATION
-# -------------------
-WP_PATH="/var/www/html"
-EXISTING_WP=false
-NEW_WP_INSTALL=false
-
-echo "[INFO] Checking for existing WordPress installation..."
-if [ -d "$WP_PATH" ] && [ -f "$WP_PATH/wp-config.php" ]; then
-    echo "[INFO] Found existing WordPress installation at $WP_PATH"
-    
-    # Try to extract database info from wp-config.php
-    if [ -f "$WP_PATH/wp-config.php" ]; then
-        echo "[INFO] Extracting database information from existing wp-config.php..."
-        
-        # Extract database name
-        DB_NAME=$(grep -i "DB_NAME" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d"'" -f4 | head -1)
-        if [ -z "$DB_NAME" ]; then
-            DB_NAME=$(grep -i "DB_NAME" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d'"' -f2 | head -1)
-        fi
-        
-        # Extract database user
-        DB_USER=$(grep -i "DB_USER" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d"'" -f4 | head -1)
-        if [ -z "$DB_USER" ]; then
-            DB_USER=$(grep -i "DB_USER" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d'"' -f2 | head -1)
-        fi
-        
-        # Extract database password
-        DB_PASSWORD=$(grep -i "DB_PASSWORD" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d"'" -f4 | head -1)
-        if [ -z "$DB_PASSWORD" ]; then
-            DB_PASSWORD=$(grep -i "DB_PASSWORD" "$WP_PATH/wp-config.php" | grep -v "^[ \t]*/\|^[ \t]*\*" | cut -d'"' -f2 | head -1)
-        fi
-        
-        if [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
-            echo "[INFO] Found existing WordPress database configuration:"
-            echo "  Database: $DB_NAME"
-            echo "  User: $DB_USER"
-            
-            # Test database connection
-            if mysql -u "$DB_USER" -p"$DB_PASSWORD" -e "USE $DB_NAME;" 2>/dev/null; then
-                echo "[SUCCESS] Database connection successful!"
-                EXISTING_WP=true
-                
-                # Get WordPress site URL from database
-                if command -v wp >/dev/null 2>&1; then
-                    SITE_URL=$(cd "$WP_PATH" && sudo -u www-data wp option get home 2>/dev/null || echo "")
-                else
-                    SITE_URL=$(mysql -u "$DB_USER" -p"$DB_PASSWORD" -D "$DB_NAME" -sN -e "SELECT option_value FROM wp_options WHERE option_name = 'home' LIMIT 1;" 2>/dev/null || echo "")
-                fi
-                
-                if [ -n "$SITE_URL" ]; then
-                    echo "[INFO] Existing WordPress site URL: $SITE_URL"
-                    echo ""
-                    echo "==============================================="
-                    echo "EXISTING WORDPRESS DETECTED"
-                    echo "==============================================="
-                    echo "Found an existing WordPress installation at:"
-                    echo "  Path: $WP_PATH"
-                    echo "  Database: $DB_NAME"
-                    echo "  Site URL: $SITE_URL"
-                    echo ""
-                    echo "Options:"
-                    echo "  1) Use existing WordPress installation"
-                    echo "  2) Install fresh WordPress (existing data will be backed up)"
-                    echo "  3) Cancel setup"
-                    echo ""
-                    
-                    while true; do
-                        read -p "Select option (1-3): " wp_option
-                        case $wp_option in
-                            1)
-                                echo "[INFO] Will use existing WordPress installation."
-                                EXISTING_WP=true
-                                break
-                                ;;
-                            2)
-                                echo "[INFO] Will install fresh WordPress."
-                                EXISTING_WP=false
-                                NEW_WP_INSTALL=true
-                                
-                                # Backup existing installation
-                                BACKUP_DIR="/root/wordpress-backup-$(date +%Y%m%d-%H%M%S)"
-                                echo "[INFO] Backing up existing WordPress to $BACKUP_DIR..."
-                                sudo mkdir -p "$BACKUP_DIR"
-                                sudo cp -r "$WP_PATH" "$BACKUP_DIR/wordpress-files"
-                                
-                                # Backup database
-                                if [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
-                                    echo "[INFO] Backing up database '$DB_NAME'..."
-                                    mysqldump -u "$DB_USER" -p"$DB_PASSWORD" "$DB_NAME" > "$BACKUP_DIR/wordpress-database.sql" 2>/dev/null || \
-                                        echo "[WARNING] Could not backup database. Continuing anyway..."
-                                fi
-                                
-                                echo "[INFO] Backup completed to: $BACKUP_DIR"
-                                echo "[INFO] Removing existing WordPress files..."
-                                sudo rm -rf "$WP_PATH"/*
-                                break
-                                ;;
-                            3)
-                                echo "[INFO] Setup cancelled by user."
-                                exit 0
-                                ;;
-                            *)
-                                echo "Invalid option. Please enter 1, 2, or 3."
-                                ;;
-                        esac
-                    done
-                fi
-            else
-                echo "[WARNING] Could not connect to existing database."
-                echo "[INFO] Will proceed with fresh installation."
-                EXISTING_WP=false
-                NEW_WP_INSTALL=true
-            fi
-        else
-            echo "[WARNING] Could not extract database info from wp-config.php"
-            echo "[INFO] Will proceed with fresh installation."
-            EXISTING_WP=false
-            NEW_WP_INSTALL=true
-        fi
-    else
-        echo "[WARNING] wp-config.php not found or readable."
-        echo "[INFO] Will proceed with fresh installation."
-        EXISTING_WP=false
-        NEW_WP_INSTALL=true
-    fi
-else
-    echo "[INFO] No existing WordPress installation found."
-    EXISTING_WP=false
-    NEW_WP_INSTALL=true
-fi
-
-# -------------------
-# DETERMINE SITE DOMAIN
-# -------------------
-if [ "$EXISTING_WP" = true ] && [ -n "$SITE_URL" ]; then
-    # Extract domain from existing site URL
-    DOMAIN=$(echo "$SITE_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|^www\.||')
-    echo "[INFO] Using existing WordPress domain: $DOMAIN"
-else
-    echo ""
-    echo "==============================================="
-    echo "WORDPRESS DOMAIN CONFIGURATION"
-    echo "==============================================="
-    echo "Please enter the primary domain for WordPress:"
-    echo "  (This will be used for SSL certificates and site URL)"
-    echo ""
-    read -p "Primary domain [$DOMAIN]: " user_domain
-    if [ -n "$user_domain" ]; then
-        DOMAIN="$user_domain"
-    fi
-    echo "[INFO] Using domain: $DOMAIN"
-fi
-
-# -------------------
-# WORDPRESS CREDENTIALS
-# -------------------
-if [ "$NEW_WP_INSTALL" = true ]; then
-    echo ""
-    echo "==============================================="
-    echo "WORDPRESS ADMIN CREDENTIALS"
-    echo "==============================================="
-    echo "Please enter admin credentials for new WordPress installation:"
-    echo ""
-    read -p "Admin username [admin]: " WP_ADMIN_USER
-    WP_ADMIN_USER="${WP_ADMIN_USER:-admin}"
-    
-    while true; do
-        read -sp "Admin password: " WP_ADMIN_PASSWORD
-        echo
-        if [ -z "$WP_ADMIN_PASSWORD" ]; then
-            echo "Password cannot be empty. Please try again."
-        else
-            read -sp "Confirm admin password: " WP_ADMIN_PASSWORD_CONFIRM
-            echo
-            if [ "$WP_ADMIN_PASSWORD" = "$WP_ADMIN_PASSWORD_CONFIRM" ]; then
-                break
-            else
-                echo "Passwords do not match. Please try again."
-            fi
-        fi
-    done
-    
-    # Database configuration for NEW installation
-    DB_NAME="wordpress_$(echo "$DOMAIN" | tr -cd '[:alnum:]' | cut -c1-16)"
-    DB_USER="wp_$(openssl rand -hex 4)"
-    DB_PASSWORD=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-24)
-else
-    # For existing installation, credentials remain unchanged
-    echo "[INFO] Using existing WordPress credentials from database."
-    WP_ADMIN_USER=""  # Not used for existing installs
-    WP_ADMIN_PASSWORD=""  # Not used for existing installs
-fi
-
-# -------------------
-# VALIDATE DNS RESOLUTION
-# -------------------
 echo ""
-echo "[INFO] Checking DNS resolution for $DOMAIN..."
-if ! dig +short "$DOMAIN" | grep -q '.'; then
-    echo "[WARNING] $DOMAIN does not resolve to any IP address."
-    echo "[WARNING] Let's Encrypt SSL certificates will fail without proper DNS."
-    
-    # Get server public IP
-    PUBLIC_IP=$(curl -s http://ifconfig.me || curl -s http://api.ipify.org || echo "unknown")
-    echo "[INFO] Your server's public IP appears to be: $PUBLIC_IP"
-    echo ""
-    echo "DNS CONFIGURATION REQUIRED:"
-    echo "==============================================="
-    echo "Please create these DNS A records pointing to $PUBLIC_IP:"
-    echo "  $DOMAIN"
-    echo "  www.$DOMAIN"
-    echo "  erp.$DOMAIN"
-    echo "  docs.$DOMAIN"
-    echo "  mail.$DOMAIN"
-    echo "  nomogrow.$DOMAIN"
-    echo "  ventura-tech.$DOMAIN"
-    echo ""
-    
-    read -p "Have you configured DNS? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "[WARNING] Continuing without DNS verification. SSL certificates will fail."
-        echo "[INFO] You can run this script again after DNS is configured."
-    fi
+echo "==============================================="
+echo " MIGRATION SUMMARY"
+echo "==============================================="
+echo "Web Server: $WEB_SERVER"
+echo "WordPress: $SELECTED_WP_PATH"
+echo "Domain: $DOMAIN"
+echo "Backup: $BACKUP_DIR"
+echo ""
+read -p "Proceed with migration? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "[INFO] Migration cancelled."
+    exit 0
 fi
 
 # -------------------
-# SYSTEM UPDATE & DEPENDENCIES
+# SYSTEM PREPARATION
 # -------------------
-echo "[INFO] Updating system and installing dependencies..."
+
+echo ""
+echo "==============================================="
+echo " SYSTEM PREPARATION"
+echo "==============================================="
+
+echo "[INFO] Updating system..."
 sudo apt update && sudo apt upgrade -y
+
+# Install required packages
+echo "[INFO] Installing required packages..."
 sudo apt install -y curl wget unzip lsb-release software-properties-common \
     net-tools ufw dnsutils git mariadb-client mariadb-server
 
 # -------------------
-# MARIADB/MYSQL SETUP
+# PHP-FPM SETUP
 # -------------------
-echo "[INFO] Setting up MariaDB..."
 
-# Start and enable MariaDB
-sudo systemctl start mariadb
-sudo systemctl enable mariadb
+echo "[INFO] Setting up PHP-FPM..."
 
-# Secure MariaDB installation (only if not already done)
-if [ ! -f ~/.mysql_configured ]; then
-    echo "[INFO] Securing MariaDB installation..."
+# Check existing PHP version
+EXISTING_PHP_VERSION=""
+if command -v php >/dev/null 2>&1; then
+    EXISTING_PHP_VERSION=$(php -r "echo PHP_MAJOR_VERSION;")
+    echo "[INFO] Found existing PHP $EXISTING_PHP_VERSION"
     
-    # Generate a secure root password
-    MYSQL_ROOT_PASS=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-24)
-    
-    sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '$MYSQL_ROOT_PASS';"
-    sudo mysql -e "DELETE FROM mysql.user WHERE User='';"
-    sudo mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-    sudo mysql -e "DROP DATABASE IF EXISTS test;"
-    sudo mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-    sudo mysql -e "FLUSH PRIVILEGES;"
-    
-    # Save root password securely
-    echo "MySQL root password: $MYSQL_ROOT_PASS" | sudo tee /root/.mysql_root_pass
-    sudo chmod 600 /root/.mysql_root_pass
-    
-    touch ~/.mysql_configured
-    echo "[INFO] MariaDB secured. Root password saved to /root/.mysql_root_pass"
-fi
-
-# Only create new database if it's a fresh installation
-if [ "$NEW_WP_INSTALL" = true ]; then
-    echo "[INFO] Creating WordPress database for new installation..."
-    
-    # Check if database already exists
-    if mysql -e "SHOW DATABASES LIKE '$DB_NAME';" | grep -q "$DB_NAME"; then
-        echo "[WARNING] Database '$DB_NAME' already exists!"
-        echo "[INFO] Will use existing database for WordPress."
-    else
-        # Create new database
-        sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-        echo "[INFO] Database '$DB_NAME' created."
+    # Check if PHP-FPM is installed
+    if ! systemctl list-unit-files | grep -q php; then
+        echo "[INFO] Installing PHP-FPM for existing PHP version..."
+        sudo apt install -y "php$EXISTING_PHP_VERSION-fpm"
     fi
     
-    # Check if user already exists
-    if mysql -e "SELECT User FROM mysql.user WHERE User='$DB_USER';" | grep -q "$DB_USER"; then
-        echo "[WARNING] Database user '$DB_USER' already exists!"
-        echo "[INFO] Updating password for existing user..."
-        sudo mysql -e "ALTER USER '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
-    else
-        # Create new user
-        sudo mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
-        echo "[INFO] User '$DB_USER' created."
-    fi
-    
-    # Grant privileges (always do this, even if user exists)
-    sudo mysql -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
-    sudo mysql -e "FLUSH PRIVILEGES;"
-    
-    echo "[INFO] Database configuration for new installation complete:"
-    echo "  Database: $DB_NAME"
-    echo "  Username: $DB_USER"
-    echo "  Password: $DB_PASSWORD"
-    
-    # Save database credentials
-    echo "DB_NAME=$DB_NAME" | sudo tee /root/.wordpress_db_info
-    echo "DB_USER=$DB_USER" | sudo tee -a /root/.wordpress_db_info
-    echo "DB_PASSWORD=$DB_PASSWORD" | sudo tee -a /root/.wordpress_db_info
-    sudo chmod 600 /root/.wordpress_db_info
-fi
-
-# -------------------
-# PHP-FPM INSTALLATION
-# -------------------
-echo "[INFO] Checking PHP-FPM..."
-
-# Determine and install PHP version
-if ! command -v php >/dev/null 2>&1; then
-    echo "[INFO] Installing PHP 8.3 and extensions..."
+    PHP_VERSION="$EXISTING_PHP_VERSION"
+else
+    # Install PHP 8.3
+    echo "[INFO] Installing PHP 8.3 with FPM..."
     sudo add-apt-repository ppa:ondrej/php -y
     sudo apt update
     sudo apt install -y php8.3 php8.3-fpm php8.3-mysql php8.3-curl php8.3-gd \
         php8.3-mbstring php8.3-xml php8.3-xmlrpc php8.3-soap php8.3-intl \
-        php8.3-zip php8.3-bcmath php8.3-imagick
+        php8.3-zip php8.3-bcmath
     PHP_VERSION="8.3"
-else
-    PHP_VERSION=$(php -r "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;")
-    echo "[INFO] PHP $PHP_VERSION already installed"
 fi
 
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 echo "[INFO] Using PHP-FPM socket: $PHP_SOCKET"
 
-# Configure PHP-FPM for WordPress
+# Configure PHP-FPM
 PHP_FPM_CONF="/etc/php/$PHP_VERSION/fpm/pool.d/www.conf"
 if [ -f "$PHP_FPM_CONF" ]; then
     # Backup original
     sudo cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
     
-    # Optimize for WordPress
+    # Configure for WordPress
     sudo sed -i 's/^pm = .*/pm = dynamic/' "$PHP_FPM_CONF"
     sudo sed -i 's/^pm.max_children = .*/pm.max_children = 20/' "$PHP_FPM_CONF"
     sudo sed -i 's/^pm.start_servers = .*/pm.start_servers = 5/' "$PHP_FPM_CONF"
     sudo sed -i 's/^pm.min_spare_servers = .*/pm.min_spare_servers = 5/' "$PHP_FPM_CONF"
     sudo sed -i 's/^pm.max_spare_servers = .*/pm.max_spare_servers = 10/' "$PHP_FPM_CONF"
     
-    # Increase limits for WordPress
-    if ! grep -q "upload_max_filesize" "$PHP_FPM_CONF"; then
-        echo "php_admin_value[upload_max_filesize] = 64M" | sudo tee -a "$PHP_FPM_CONF"
-        echo "php_admin_value[post_max_size] = 64M" | sudo tee -a "$PHP_FPM_CONF"
-        echo "php_admin_value[max_execution_time] = 300" | sudo tee -a "$PHP_FPM_CONF"
-        echo "php_admin_value[max_input_time] = 300" | sudo tee -a "$PHP_FPM_CONF"
-        echo "php_admin_value[memory_limit] = 256M" | sudo tee -a "$PHP_FPM_CONF"
+    # Set user/group to match web server user
+    if [ "$WEB_SERVER" = "apache" ]; then
+        sudo sed -i 's/^user = .*/user = www-data/' "$PHP_FPM_CONF"
+        sudo sed -i 's/^group = .*/group = www-data/' "$PHP_FPM_CONF"
     fi
+    
+    # Increase limits
+    echo "php_admin_value[upload_max_filesize] = 64M" | sudo tee -a "$PHP_FPM_CONF"
+    echo "php_admin_value[post_max_size] = 64M" | sudo tee -a "$PHP_FPM_CONF"
+    echo "php_admin_value[max_execution_time] = 300" | sudo tee -a "$PHP_FPM_CONF"
 fi
 
 # Start PHP-FPM
@@ -409,8 +298,154 @@ sudo systemctl restart "php${PHP_VERSION}-fpm"
 sudo systemctl enable --now "php${PHP_VERSION}-fpm"
 
 # -------------------
-# CADDY INSTALLATION WITH LET'S ENCRYPT
+# MIGRATE WORDPRESS CONFIGURATION
 # -------------------
+
+echo ""
+echo "==============================================="
+echo " MIGRATING WORDPRESS CONFIGURATION"
+echo "==============================================="
+
+if [ "$EXISTING_WP" = true ]; then
+    echo "[INFO] Preparing existing WordPress for Caddy..."
+    
+    # Ensure proper permissions
+    echo "[INFO] Setting WordPress permissions..."
+    sudo chown -R www-data:www-data "$SELECTED_WP_PATH"
+    sudo find "$SELECTED_WP_PATH" -type d -exec chmod 755 {} \;
+    sudo find "$SELECTED_WP_PATH" -type f -exec chmod 644 {} \;
+    
+    # Update wp-config.php for Caddy reverse proxy
+    WP_CONFIG="$SELECTED_WP_PATH/wp-config.php"
+    if [ -f "$WP_CONFIG" ]; then
+        echo "[INFO] Updating wp-config.php for Caddy..."
+        
+        # Remove any existing reverse proxy settings
+        sudo sed -i '/HTTP_X_FORWARDED_PROTO/d' "$WP_CONFIG"
+        sudo sed -i '/HTTP_X_FORWARDED_HOST/d' "$WP_CONFIG"
+        sudo sed -i '/Reverse Proxy Support/d' "$WP_CONFIG"
+        
+        # Add Caddy reverse proxy support
+        if ! grep -q "HTTP_X_FORWARDED_PROTO" "$WP_CONFIG"; then
+            cat >> "$WP_CONFIG" << 'EOF'
+
+/* ============================================
+ * Caddy Reverse Proxy Support
+ * Added during migration from $WEB_SERVER to Caddy
+ * ============================================ */
+if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+    $_SERVER['SERVER_PORT'] = 443;
+}
+if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
+
+/* Update WordPress URLs if domain changed */
+if (!defined('WP_SITEURL')) {
+    define('WP_SITEURL', 'https://' . $_SERVER['HTTP_HOST']);
+}
+if (!defined('WP_HOME')) {
+    define('WP_HOME', 'https://' . $_SERVER['HTTP_HOST']);
+}
+
+/* Security and Performance */
+define('FORCE_SSL_ADMIN', true);
+EOF
+        fi
+        
+        # Update database constants if they don't exist
+        if [ -n "$DB_NAME" ] && ! grep -q "define.*DB_NAME" "$WP_CONFIG"; then
+            sed -i "/<?php/a define('DB_NAME', '$DB_NAME');" "$WP_CONFIG"
+        fi
+        if [ -n "$DB_USER" ] && ! grep -q "define.*DB_USER" "$WP_CONFIG"; then
+            sed -i "/DB_NAME/a define('DB_USER', '$DB_USER');" "$WP_CONFIG"
+        fi
+        if [ -n "$DB_PASSWORD" ] && ! grep -q "define.*DB_PASSWORD" "$WP_CONFIG"; then
+            sed -i "/DB_USER/a define('DB_PASSWORD', '$DB_PASSWORD');" "$WP_CONFIG"
+        fi
+        if [ -n "$DB_HOST" ] && ! grep -q "define.*DB_HOST" "$WP_CONFIG"; then
+            sed -i "/DB_PASSWORD/a define('DB_HOST', '$DB_HOST');" "$WP_CONFIG"
+        fi
+        
+        echo "[SUCCESS] WordPress configuration updated for Caddy"
+    fi
+    
+    # Update WordPress URLs in database if domain changed
+    echo "[INFO] Updating WordPress URLs in database..."
+    if command -v wp >/dev/null 2>&1; then
+        cd "$SELECTED_WP_PATH"
+        
+        # Get current URLs
+        OLD_HOME=$(sudo -u www-data wp option get home 2>/dev/null || echo "")
+        OLD_SITEURL=$(sudo -u www-data wp option get siteurl 2>/dev/null || echo "")
+        
+        NEW_HOME="https://$DOMAIN"
+        
+        if [ -n "$OLD_HOME" ] && [ "$OLD_HOME" != "$NEW_HOME" ]; then
+            echo "[INFO] Updating WordPress URLs from $OLD_HOME to $NEW_HOME"
+            sudo -u www-data wp search-replace "$OLD_HOME" "$NEW_HOME" --all-tables --quiet
+            sudo -u www-data wp search-replace "http://$DOMAIN" "https://$DOMAIN" --all-tables --quiet
+            sudo -u www-data wp search-replace "http://www.$DOMAIN" "https://$DOMAIN" --all-tables --quiet
+            echo "[SUCCESS] WordPress URLs updated"
+        else
+            echo "[INFO] WordPress URLs already correct"
+        fi
+        
+        # Flush cache
+        sudo -u www-data wp cache flush 2>/dev/null || true
+    else
+        echo "[WARNING] wp-cli not available. URLs may need manual update."
+    fi
+else
+    # Fresh WordPress installation
+    echo "[INFO] Installing fresh WordPress..."
+    
+    sudo mkdir -p "$SELECTED_WP_PATH"
+    cd /tmp
+    wget -q https://wordpress.org/latest.zip
+    unzip -q latest.zip
+    sudo mv wordpress/* "$SELECTED_WP_PATH/"
+    sudo rm -rf wordpress latest.zip
+    
+    # Generate database credentials
+    DB_NAME="wp_$(echo "$DOMAIN" | tr -cd '[:alnum:]' | cut -c1-16)"
+    DB_USER="wpuser_$(openssl rand -hex 4)"
+    DB_PASSWORD=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-24)
+    DB_HOST="localhost"
+    
+    # Create database
+    echo "[INFO] Creating database $DB_NAME..."
+    sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    sudo mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
+    sudo mysql -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
+    sudo mysql -e "FLUSH PRIVILEGES;"
+    
+    # Configure wp-config.php
+    sudo cp "$SELECTED_WP_PATH/wp-config-sample.php" "$SELECTED_WP_PATH/wp-config.php"
+    sudo sed -i "s/database_name_here/$DB_NAME/" "$SELECTED_WP_PATH/wp-config.php"
+    sudo sed -i "s/username_here/$DB_USER/" "$SELECTED_WP_PATH/wp-config.php"
+    sudo sed -i "s/password_here/$DB_PASSWORD/" "$SELECTED_WP_PATH/wp-config.php"
+    
+    # Generate salts
+    SALT=$(curl -s https://api.wordpress.org/secret-key/1.1/salt/)
+    sudo sed -i "/define( 'AUTH_KEY',/a $SALT" "$SELECTED_WP_PATH/wp-config.php"
+    
+    # Set permissions
+    sudo chown -R www-data:www-data "$SELECTED_WP_PATH"
+    
+    echo "[INFO] Fresh WordPress installation complete"
+fi
+
+# -------------------
+# INSTALL CADDY
+# -------------------
+
+echo ""
+echo "==============================================="
+echo " INSTALLING CADDY"
+echo "==============================================="
+
 echo "[INFO] Installing Caddy..."
 if ! command -v caddy >/dev/null 2>&1; then
     sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -421,159 +456,142 @@ if ! command -v caddy >/dev/null 2>&1; then
 fi
 
 # -------------------
-# STOP OTHER WEB SERVERS
+# MIGRATE OLD WEB SERVER CONFIGURATION
 # -------------------
-echo "[INFO] Stopping other web servers..."
-for service in apache2 nginx; do
-    sudo systemctl stop "$service" 2>/dev/null || true
-    sudo systemctl disable "$service" 2>/dev/null || true
-    sudo systemctl mask "$service" 2>/dev/null || true
+
+echo ""
+echo "==============================================="
+echo " MIGRATING WEB SERVER CONFIGURATION"
+echo "==============================================="
+
+# Extract virtual host configurations from old web server
+ADDITIONAL_DOMAINS=()
+
+if [ "$WEB_SERVER" = "apache" ]; then
+    echo "[INFO] Migrating Apache virtual hosts..."
+    
+    # Find all enabled sites
+    for conf_file in /etc/apache2/sites-enabled/*.conf; do
+        if [ -f "$conf_file" ]; then
+            echo "[INFO] Processing Apache config: $conf_file"
+            
+            # Extract ServerName and ServerAlias
+            SERVER_NAME=$(grep -i "ServerName" "$conf_file" | head -1 | awk '{print $2}')
+            SERVER_ALIASES=$(grep -i "ServerAlias" "$conf_file" | awk '{print $2}')
+            
+            if [ -n "$SERVER_NAME" ]; then
+                ADDITIONAL_DOMAINS+=("$SERVER_NAME")
+                echo "  - Found domain: $SERVER_NAME"
+                
+                # Check if this is the WordPress site
+                DOCUMENT_ROOT=$(grep -i "DocumentRoot" "$conf_file" | head -1 | awk '{print $2}')
+                if [ "$DOCUMENT_ROOT" = "$SELECTED_WP_PATH" ]; then
+                    echo "  - This is the WordPress document root"
+                fi
+            fi
+            
+            for alias in $SERVER_ALIASES; do
+                ADDITIONAL_DOMAINS+=("$alias")
+                echo "  - Found alias: $alias"
+            done
+        fi
+    done
+    
+elif [ "$WEB_SERVER" = "nginx" ]; then
+    echo "[INFO] Migrating Nginx server blocks..."
+    
+    # Find all enabled sites
+    for conf_file in /etc/nginx/sites-enabled/*; do
+        if [ -f "$conf_file" ]; then
+            echo "[INFO] Processing Nginx config: $conf_file"
+            
+            # Extract server_name
+            SERVER_NAMES=$(grep -i "server_name" "$conf_file" | head -1 | sed 's/server_name//' | sed 's/;//' | tr -d '\t')
+            
+            for server in $SERVER_NAMES; do
+                if [ "$server" != "_" ] && [ "$server" != "localhost" ]; then
+                    ADDITIONAL_DOMAINS+=("$server")
+                    echo "  - Found domain: $server"
+                    
+                    # Check if this is the WordPress site
+                    ROOT_DIR=$(grep -i "root" "$conf_file" | head -1 | awk '{print $2}' | sed 's/;//')
+                    if [ "$ROOT_DIR" = "$SELECTED_WP_PATH" ]; then
+                        echo "  - This is the WordPress root directory"
+                    fi
+                fi
+            done
+        fi
+    done
+fi
+
+# Remove duplicates and main domain
+UNIQUE_DOMAINS=()
+for domain in "${ADDITIONAL_DOMAINS[@]}"; do
+    domain=$(echo "$domain" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|^www\.||')
+    if [[ ! " ${UNIQUE_DOMAINS[@]} " =~ " ${domain} " ]] && [ "$domain" != "$DOMAIN" ] && [ "$domain" != "www.$DOMAIN" ]; then
+        UNIQUE_DOMAINS+=("$domain")
+    fi
 done
 
-# -------------------
-# WORDPRESS INSTALLATION/CONFIGURATION
-# -------------------
-if [ "$NEW_WP_INSTALL" = true ]; then
-    echo "[INFO] Installing fresh WordPress..."
-    
-    # Create directory if it doesn't exist
-    sudo mkdir -p "$WP_PATH"
-    
-    # Download WordPress
-    cd /tmp
-    wget -q https://wordpress.org/latest.zip
-    unzip -q latest.zip
-    sudo mv wordpress/* "$WP_PATH/"
-    sudo rm -rf wordpress latest.zip
-    
-    # Create wp-config.php
-    echo "[INFO] Creating wp-config.php..."
-    sudo cp "$WP_PATH/wp-config-sample.php" "$WP_PATH/wp-config.php"
-    
-    # Set database configuration
-    sudo sed -i "s/database_name_here/$DB_NAME/" "$WP_PATH/wp-config.php"
-    sudo sed -i "s/username_here/$DB_USER/" "$WP_PATH/wp-config.php"
-    sudo sed -i "s/password_here/$DB_PASSWORD/" "$WP_PATH/wp-config.php"
-    sudo sed -i "s/localhost/localhost/" "$WP_PATH/wp-config.php"
-    
-    # Generate secure salts
-    echo "[INFO] Generating secure authentication keys..."
-    SALT=$(curl -s https://api.wordpress.org/secret-key/1.1/salt/)
-    sudo sed -i "/define( 'AUTH_KEY',/a $SALT" "$WP_PATH/wp-config.php"
-    
-    # Install WordPress via wp-cli or manually
-    echo "[INFO] Installing WordPress core..."
-    
-    # Check if wp-cli is available
-    if command -v wp >/dev/null 2>&1; then
-        cd "$WP_PATH"
-        sudo -u www-data wp core install \
-            --url="https://$DOMAIN" \
-            --title="Sahmcore" \
-            --admin_user="$WP_ADMIN_USER" \
-            --admin_password="$WP_ADMIN_PASSWORD" \
-            --admin_email="$ADMIN_EMAIL" \
-            --skip-email
-        
-        # Set pretty permalinks
-        sudo -u www-data wp rewrite structure '/%postname%/' --hard
-    else
-        # Install wp-cli
-        curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-        chmod +x wp-cli.phar
-        sudo mv wp-cli.phar /usr/local/bin/wp
-        
-        cd "$WP_PATH"
-        sudo -u www-data wp core install \
-            --url="https://$DOMAIN" \
-            --title="Sahmcore" \
-            --admin_user="$WP_ADMIN_USER" \
-            --admin_password="$WP_ADMIN_PASSWORD" \
-            --admin_email="$ADMIN_EMAIL" \
-            --skip-email
-    fi
-    
-    echo "[INFO] Fresh WordPress installation complete!"
-else
-    echo "[INFO] Using existing WordPress installation..."
-    
-    # Verify the existing installation is working
-    if [ -f "$WP_PATH/wp-config.php" ]; then
-        echo "[INFO] Found existing wp-config.php"
-        
-        # Update site URLs in database if needed
-        if command -v wp >/dev/null 2>&1; then
-            cd "$WP_PATH"
-            
-            # Get current URLs
-            CURRENT_HOME=$(sudo -u www-data wp option get home 2>/dev/null || echo "")
-            CURRENT_SITEURL=$(sudo -u www-data wp option get siteurl 2>/dev/null || echo "")
-            
-            # Update if different from new domain
-            if [ -n "$CURRENT_HOME" ] && [[ "$CURRENT_HOME" != *"$DOMAIN"* ]]; then
-                echo "[INFO] Updating WordPress URLs to use $DOMAIN..."
-                sudo -u www-data wp search-replace "$CURRENT_HOME" "https://$DOMAIN" --all-tables --quiet
-                sudo -u www-data wp search-replace "$CURRENT_SITEURL" "https://$DOMAIN" --all-tables --quiet
-            fi
-        fi
-    else
-        echo "[ERROR] Existing WordPress installation appears broken (wp-config.php missing)"
-        echo "[INFO] Will attempt to continue with Caddy setup..."
-    fi
-fi
-
-# Add reverse proxy support to wp-config.php (if not already present)
-if [ -f "$WP_PATH/wp-config.php" ] && ! grep -q "HTTP_X_FORWARDED_PROTO" "$WP_PATH/wp-config.php"; then
-    echo "[INFO] Adding reverse proxy support to wp-config.php..."
-    cat >> "$WP_PATH/wp-config.php" << 'EOF'
-
-/* Reverse Proxy Support for Caddy */
-if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
-    $_SERVER['HTTPS'] = 'on';
-    $_SERVER['SERVER_PORT'] = 443;
-}
-if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
-    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
-}
-
-/* Debugging Settings */
-define('WP_DEBUG', false);
-define('WP_DEBUG_LOG', false);
-define('WP_DEBUG_DISPLAY', false);
-EOF
-fi
-
-# Set proper permissions
-sudo chown -R www-data:www-data "$WP_PATH"
-sudo find "$WP_PATH" -type d -exec chmod 755 {} \;
-sudo find "$WP_PATH" -type f -exec chmod 644 {} \;
-
-# Special permissions for wp-content
-if [ -d "$WP_PATH/wp-content" ]; then
-    sudo chmod 775 "$WP_PATH/wp-content"
-    sudo chown -R www-data:www-data "$WP_PATH/wp-content"
-fi
+echo "[INFO] Found additional domains: ${UNIQUE_DOMAINS[*]}"
 
 # -------------------
-# CREATE CADDYFILE WITH LET'S ENCRYPT
+# CREATE CADDYFILE
 # -------------------
-echo "[INFO] Creating Caddyfile with Let's Encrypt SSL..."
+
+echo ""
+echo "==============================================="
+echo " CREATING CADDY CONFIGURATION"
+echo "==============================================="
 
 # Backup existing Caddyfile
 sudo cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.backup-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 
-# Create new Caddyfile
+# Build domain list for Caddyfile
+CADDY_DOMAINS="$DOMAIN, www.$DOMAIN"
+for extra_domain in "${UNIQUE_DOMAINS[@]}"; do
+    if [ -n "$extra_domain" ]; then
+        CADDY_DOMAINS="$CADDY_DOMAINS, $extra_domain"
+        if [[ ! "$extra_domain" =~ ^www\. ]]; then
+            CADDY_DOMAINS="$CADDY_DOMAINS, www.$extra_domain"
+        fi
+    fi
+done
+
+# Create Caddyfile
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
-# Global options for Let's Encrypt
+# ============================================
+# Caddy Configuration
+# Migrated from $WEB_SERVER on $(date)
+# WordPress: $SELECTED_WP_PATH
+# ============================================
+
+# Global settings
 {
     email $ADMIN_EMAIL
-    # Use HTTP challenge (requires port 80 to be accessible)
+    # Uncomment for DNS challenge (recommended for wildcard)
+    # acme_dns cloudflare <token>
+    
+    # HTTP challenge (requires port 80 accessible)
     acme_ca https://acme-v02.api.letsencrypt.org/directory
+    
+    # Security headers (applied to all sites)
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+    }
+    
+    # Logging
+    log {
+        output file /var/log/caddy/access.log
+        level INFO
+    }
 }
 
 # Main WordPress site
-$DOMAIN, www.$DOMAIN {
-    root * $WP_PATH
+$CADDY_DOMAINS {
+    root * $SELECTED_WP_PATH
     
     # PHP-FPM configuration
     php_fastcgi unix:$PHP_SOCKET {
@@ -582,28 +600,36 @@ $DOMAIN, www.$DOMAIN {
         index index.php
     }
     
-    # File server for static content
+    # File server
     file_server
     
-    # WordPress rewrite rules
+    # WordPress URL rewrites
     try_files {path} {path}/ /index.php?{query}
     
-    # Compression
-    encode gzip
-    
-    # Security headers
+    # Security headers specific to WordPress
     header {
-        X-Frame-Options "SAMEORIGIN"
-        X-Content-Type-Options "nosniff"
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
-        -Server
+        Permissions-Policy "geolocation=(), microphone=(), camera=()"
     }
     
-    # Logging
+    # Compression
+    encode gzip zstd
+    
+    # WordPress-specific logging
     log {
         output file /var/log/caddy/wordpress.log
+        format json
         level INFO
+    }
+    
+    # Error pages
+    handle_errors {
+        @404 {
+            expression {http.error.status_code} == 404
+        }
+        rewrite @404 /index.php?{query}
+        file_server
     }
 }
 
@@ -614,9 +640,7 @@ erp.$DOMAIN {
         header_up X-Forwarded-Proto {scheme}
         header_up X-Forwarded-For {remote}
     }
-    log {
-        output file /var/log/caddy/erp.log
-    }
+    log /var/log/caddy/erp.log
 }
 
 # Documentation Service
@@ -628,9 +652,7 @@ docs.$DOMAIN {
         header_up Host {host}
         header_up X-Forwarded-Proto {scheme}
     }
-    log {
-        output file /var/log/caddy/docs.log
-    }
+    log /var/log/caddy/docs.log
 }
 
 # Mail Service
@@ -642,9 +664,7 @@ mail.$DOMAIN {
         header_up Host {host}
         header_up X-Forwarded-Proto {scheme}
     }
-    log {
-        output file /var/log/caddy/mail.log
-    }
+    log /var/log/caddy/mail.log
 }
 
 # Nomogrow Service
@@ -653,9 +673,7 @@ nomogrow.$DOMAIN {
         header_up Host {host}
         header_up X-Forwarded-Proto {scheme}
     }
-    log {
-        output file /var/log/caddy/nomogrow.log
-    }
+    log /var/log/caddy/nomogrow.log
 }
 
 # Ventura-Tech Service
@@ -664,26 +682,37 @@ ventura-tech.$DOMAIN {
         header_up Host {host}
         header_up X-Forwarded-Proto {scheme}
     }
-    log {
-        output file /var/log/caddy/ventura-tech.log
-    }
+    log /var/log/caddy/ventura-tech.log
 }
 
 # Health check endpoint
 health.$DOMAIN {
-    respond "OK" 200 {
-        header Content-Type "text/plain"
-        header Cache-Control "no-cache"
+    respond "{
+        \"status\": \"healthy\",
+        \"server\": \"$THIS_VM_IP\",
+        \"wordpress\": \"$SELECTED_WP_PATH\",
+        \"php\": \"$PHP_VERSION\",
+        \"migrated_from\": \"$WEB_SERVER\"
+    }" 200 {
+        header Content-Type "application/json"
     }
 }
 
-# HTTP to HTTPS redirect
+# Redirect HTTP to HTTPS
 http://${DOMAIN}, http://www.${DOMAIN}, http://erp.${DOMAIN}, http://docs.${DOMAIN}, http://mail.${DOMAIN}, http://nomogrow.${DOMAIN}, http://ventura-tech.${DOMAIN} {
     redir https://{host}{uri} permanent
 }
+
+# Handle Let's Encrypt HTTP challenge
+@acme path /.well-known/acme-challenge/*
+handle @acme {
+    reverse_proxy unix//run/caddy.sock
+}
 EOF
 
-# Set proper permissions for Caddy
+echo "[SUCCESS] Caddyfile created"
+
+# Set permissions
 sudo chown -R caddy:caddy /etc/caddy
 sudo chmod 644 /etc/caddy/Caddyfile
 
@@ -692,9 +721,38 @@ sudo mkdir -p /var/log/caddy
 sudo chown -R caddy:caddy /var/log/caddy
 
 # -------------------
-# FIREWALL SETUP
+# STOP OLD WEB SERVER
 # -------------------
-echo "[INFO] Configuring firewall..."
+
+echo ""
+echo "==============================================="
+echo " STOPPING OLD WEB SERVER"
+echo "==============================================="
+
+if [ "$WEB_SERVER" = "apache" ]; then
+    echo "[INFO] Stopping Apache..."
+    sudo systemctl stop apache2
+    sudo systemctl disable apache2
+    # Don't mask so we can restart if needed for migration
+    
+elif [ "$WEB_SERVER" = "nginx" ]; then
+    echo "[INFO] Stopping Nginx..."
+    sudo systemctl stop nginx
+    sudo systemctl disable nginx
+    # Don't mask so we can restart if needed for migration
+fi
+
+echo "[INFO] Old web server stopped"
+
+# -------------------
+# CONFIGURE FIREWALL
+# -------------------
+
+echo ""
+echo "==============================================="
+echo " CONFIGURING FIREWALL"
+echo "==============================================="
+
 sudo ufw --force reset
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
@@ -704,131 +762,171 @@ sudo ufw allow 443/tcp comment 'HTTPS'
 sudo ufw allow from 192.168.116.0/24 comment 'Internal network'
 echo "y" | sudo ufw enable
 
-echo "[INFO] Firewall status:"
+echo "[INFO] Firewall configured"
 sudo ufw status verbose
 
 # -------------------
-# CREATE TEST FILES
+# START CADDY
 # -------------------
-echo "[INFO] Creating test files..."
 
-# Create test.php
-sudo tee "$WP_PATH/test.php" > /dev/null << 'EOF'
-<?php
-header('Content-Type: text/plain');
-echo "=== WordPress Test Page ===\n\n";
-echo "WordPress Status: ";
-if (file_exists('wp-config.php')) {
-    echo "INSTALLED\n";
-    
-    // Try to connect to database
-    $config = file_get_contents('wp-config.php');
-    if (preg_match("/define\s*\(\s*'DB_NAME'\s*,\s*'([^']+)'\s*\)/", $config, $matches)) {
-        $db_name = $matches[1];
-        echo "Database Name: $db_name\n";
-    }
-    
-    if (preg_match("/define\s*\(\s*'DB_USER'\s*,\s*'([^']+)'\s*\)/", $config, $matches)) {
-        $db_user = $matches[1];
-        echo "Database User: $db_user\n";
-    }
-    
-    echo "PHP Version: " . PHP_VERSION . "\n";
-    echo "Server Software: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'Unknown') . "\n";
-    echo "HTTPS: " . (isset($_SERVER['HTTPS']) ? 'Yes' : 'No') . "\n";
-    
-} else {
-    echo "NOT INSTALLED or wp-config.php not found\n";
-}
-?>
-EOF
-
-# Create info.php (temporary, for debugging)
-sudo tee "$WP_PATH/info.php" > /dev/null << 'EOF'
-<?php 
-if (isset($_GET['debug']) && $_GET['debug'] === 'admin123') {
-    phpinfo();
-} else {
-    echo "Access denied.";
-}
-?>
-EOF
-
-sudo chown www-data:www-data "$WP_PATH/test.php" "$WP_PATH/info.php"
-sudo chmod 600 "$WP_PATH/info.php"
-sudo chmod 644 "$WP_PATH/test.php"
-
-# -------------------
-# START AND VALIDATE SERVICES
-# -------------------
-echo "[INFO] Starting and validating services..."
-
-# Start PHP-FPM
-echo "[INFO] Starting PHP-FPM..."
-sudo systemctl restart "php${PHP_VERSION}-fpm"
-if sudo systemctl is-active --quiet "php${PHP_VERSION}-fpm"; then
-    echo "[SUCCESS] PHP-FPM is running"
-else
-    echo "[ERROR] PHP-FPM failed to start"
-    sudo systemctl status "php${PHP_VERSION}-fpm" --no-pager
-fi
-
-# Start Caddy
-echo "[INFO] Starting Caddy..."
-sudo systemctl restart caddy
-sleep 5
-
-if sudo systemctl is-active --quiet caddy; then
-    echo "[SUCCESS] Caddy is running"
-else
-    echo "[ERROR] Caddy failed to start"
-    sudo systemctl status caddy --no-pager
-fi
+echo ""
+echo "==============================================="
+echo " STARTING CADDY"
+echo "==============================================="
 
 # Validate Caddy configuration
 echo "[INFO] Validating Caddy configuration..."
 if sudo caddy validate --config /etc/caddy/Caddyfile 2>&1; then
     echo "[SUCCESS] Caddyfile is valid"
 else
-    echo "[ERROR] Caddyfile validation failed"
-    sudo caddy validate --config /etc/caddy/Caddyfile 2>&1
+    echo "[ERROR] Caddyfile validation failed. Check configuration."
+    exit 1
 fi
+
+# Start Caddy
+sudo systemctl restart caddy
+sudo systemctl enable caddy
+
+# Wait for Caddy to start
+sleep 5
+
+if sudo systemctl is-active --quiet caddy; then
+    echo "[SUCCESS] Caddy is running"
+else
+    echo "[ERROR] Caddy failed to start"
+    sudo journalctl -u caddy --no-pager -n 20
+    exit 1
+fi
+
+# -------------------
+# CREATE TEST FILES
+# -------------------
+
+echo ""
+echo "==============================================="
+echo " CREATING TEST FILES"
+echo "==============================================="
+
+# Create migration test file
+sudo tee "$SELECTED_WP_PATH/migration-test.html" > /dev/null << EOF
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Migration Successful - $DOMAIN</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .success { color: green; font-size: 24px; }
+        .info { margin: 20px 0; padding: 15px; background: #f5f5f5; }
+    </style>
+</head>
+<body>
+    <h1>Migration Successful! 🎉</h1>
+    
+    <div class="info">
+        <p><strong>Domain:</strong> $DOMAIN</p>
+        <p><strong>Web Server:</strong> Migrated from $WEB_SERVER to Caddy</p>
+        <p><strong>PHP Version:</strong> $PHP_VERSION</p>
+        <p><strong>WordPress Path:</strong> $SELECTED_WP_PATH</p>
+        <p><strong>Migration Date:</strong> $(date)</p>
+    </div>
+    
+    <div class="success">
+        ✓ Caddy is now serving your WordPress site
+    </div>
+    
+    <p>
+        <a href="/wp-admin">WordPress Admin</a> |
+        <a href="/">Home Page</a> |
+        <a href="/migration-info.php">PHP Info</a>
+    </p>
+</body>
+</html>
+EOF
+
+# Create PHP info file (protected)
+sudo tee "$SELECTED_WP_PATH/migration-info.php" > /dev/null << 'EOF'
+<?php
+// Only show if accessed from localhost or with secret key
+$secret_key = 'migration-' . date('Ymd');
+if ($_SERVER['REMOTE_ADDR'] === '127.0.0.1' || 
+    (isset($_GET['key']) && $_GET['key'] === $secret_key)) {
+    phpinfo();
+} else {
+    header('HTTP/1.0 403 Forbidden');
+    echo 'Access denied. This file is for migration debugging only.';
+}
+?>
+EOF
+
+sudo chown www-data:www-data "$SELECTED_WP_PATH/migration-test.html" "$SELECTED_WP_PATH/migration-info.php"
+sudo chmod 644 "$SELECTED_WP_PATH/migration-test.html"
+sudo chmod 600 "$SELECTED_WP_PATH/migration-info.php"
 
 # -------------------
 # HEALTH CHECKS
 # -------------------
-echo "[INFO] Performing health checks..."
 
-# Check PHP-FPM socket
-if [ -S "$PHP_SOCKET" ]; then
-    echo "[SUCCESS] PHP-FPM socket exists: $PHP_SOCKET"
+echo ""
+echo "==============================================="
+echo " PERFORMING HEALTH CHECKS"
+echo "==============================================="
+
+# Check PHP-FPM
+echo -n "[TEST] PHP-FPM status: "
+if systemctl is-active --quiet "php${PHP_VERSION}-fpm"; then
+    echo "✓ RUNNING"
 else
-    echo "[ERROR] PHP-FPM socket not found"
+    echo "✗ NOT RUNNING"
 fi
 
-# Test local access
-echo "[INFO] Testing local WordPress access..."
-LOCAL_TEST=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $DOMAIN" http://127.0.0.1/test.php 2>/dev/null || echo "000")
-if [ "$LOCAL_TEST" = "200" ]; then
-    echo "[SUCCESS] WordPress is accessible locally"
+# Check Caddy
+echo -n "[TEST] Caddy status: "
+if systemctl is-active --quiet caddy; then
+    echo "✓ RUNNING"
 else
-    echo "[WARNING] Local test returned HTTP $LOCAL_TEST"
+    echo "✗ NOT RUNNING"
+fi
+
+# Check PHP socket
+echo -n "[TEST] PHP-FPM socket: "
+if [ -S "$PHP_SOCKET" ]; then
+    echo "✓ EXISTS ($PHP_SOCKET)"
+else
+    echo "✗ MISSING"
+fi
+
+# Test WordPress locally
+echo -n "[TEST] WordPress local access: "
+LOCAL_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $DOMAIN" http://127.0.0.1/migration-test.html 2>/dev/null || echo "000")
+if [ "$LOCAL_STATUS" = "200" ]; then
+    echo "✓ SUCCESS (HTTP $LOCAL_STATUS)"
+else
+    echo "✗ FAILED (HTTP $LOCAL_STATUS)"
 fi
 
 # Test PHP execution
-echo "[INFO] Testing PHP execution..."
-if php -r "echo 'PHP OK';" 2>/dev/null; then
-    echo "[SUCCESS] PHP CLI is working"
+echo -n "[TEST] PHP execution: "
+if php -r "echo 'OK';" >/dev/null 2>&1; then
+    echo "✓ WORKING"
 else
-    echo "[ERROR] PHP CLI is not working"
+    echo "✗ FAILED"
+fi
+
+# Check SSL certificates (if DNS is configured)
+echo -n "[TEST] SSL certificates: "
+if sudo caddy list-certificates 2>/dev/null | grep -q "$DOMAIN"; then
+    echo "✓ OBTAINED"
+else
+    echo "⚠ PENDING (DNS may not be configured)"
 fi
 
 # -------------------
-# FINAL CONFIGURATION
+# CREATE LOGROTATE AND MONITORING
 # -------------------
 
-# Create logrotate config
-sudo tee /etc/logrotate.d/caddy > /dev/null << 'LOGROTATE'
+echo ""
+echo "[INFO] Setting up log rotation..."
+sudo tee /etc/logrotate.d/caddy-migration > /dev/null << 'LOGROTATE'
 /var/log/caddy/*.log {
     daily
     missingok
@@ -844,140 +942,152 @@ sudo tee /etc/logrotate.d/caddy > /dev/null << 'LOGROTATE'
 }
 LOGROTATE
 
-# Create health check script
-sudo tee /usr/local/bin/check-wordpress-health > /dev/null << 'HEALTH'
+# Create migration recovery script
+sudo tee /usr/local/bin/restore-webserver > /dev/null << 'RECOVERY'
 #!/bin/bash
-# WordPress health check script
+# Migration recovery script
+# Restores original web server configuration if needed
 
-echo "=== WordPress Health Check ==="
-echo "Time: $(date)"
-echo ""
-
-# Check PHP-FPM
-if systemctl is-active --quiet php*-fpm; then
-    echo "✅ PHP-FPM: RUNNING"
-else
-    echo "❌ PHP-FPM: NOT RUNNING"
+BACKUP_DIR="$1"
+if [ -z "$BACKUP_DIR" ]; then
+    echo "Usage: $0 <backup-directory>"
+    echo "Available backups:"
+    ls -d /root/webserver-backup-* 2>/dev/null || echo "No backups found"
+    exit 1
 fi
 
-# Check Caddy
-if systemctl is-active --quiet caddy; then
-    echo "✅ Caddy: RUNNING"
-else
-    echo "❌ Caddy: NOT RUNNING"
+if [ ! -d "$BACKUP_DIR" ]; then
+    echo "Backup directory not found: $BACKUP_DIR"
+    exit 1
 fi
 
-# Check PHP socket
-PHP_SOCKET=$(ls /run/php/php*.sock 2>/dev/null | head -1)
-if [ -n "$PHP_SOCKET" ] && [ -S "$PHP_SOCKET" ]; then
-    echo "✅ PHP Socket: EXISTS ($PHP_SOCKET)"
-else
-    echo "❌ PHP Socket: MISSING"
+echo "Restoring from backup: $BACKUP_DIR"
+
+# Stop Caddy
+echo "Stopping Caddy..."
+systemctl stop caddy
+systemctl disable caddy
+
+# Restore Apache
+if [ -d "$BACKUP_DIR/apache2" ]; then
+    echo "Restoring Apache configuration..."
+    cp -r "$BACKUP_DIR/apache2" /etc/
+    systemctl start apache2
+    systemctl enable apache2
+    echo "Apache restored"
 fi
 
-# Check disk space
-DISK_USAGE=$(df / --output=pcent | tail -1 | tr -d '% ' | tr -d ' ')
-if [ "$DISK_USAGE" -lt 90 ]; then
-    echo "✅ Disk Usage: ${DISK_USAGE}%"
-else
-    echo "⚠️  Disk Usage: ${DISK_USAGE}% (High)"
+# Restore Nginx
+if [ -d "$BACKUP_DIR/nginx" ]; then
+    echo "Restoring Nginx configuration..."
+    cp -r "$BACKUP_DIR/nginx" /etc/
+    systemctl start nginx
+    systemctl enable nginx
+    echo "Nginx restored"
 fi
 
-echo ""
-echo "=== Test Complete ==="
-HEALTH
+# Restore WordPress database if backed up
+if [ -f "$BACKUP_DIR/wordpress-database.sql" ]; then
+    echo "Restoring WordPress database..."
+    mysql < "$BACKUP_DIR/wordpress-database.sql"
+    echo "Database restored"
+fi
 
-sudo chmod +x /usr/local/bin/check-wordpress-health
+echo "Recovery complete. Original web server restored."
+echo "Note: You may need to adjust firewall rules manually."
+RECOVERY
 
-# Remove temporary info.php after a delay (for debugging)
-echo "[INFO] Will remove info.php in 5 minutes for security..."
-(sleep 300 && sudo rm -f "$WP_PATH/info.php" && echo "[INFO] Removed info.php for security") &
+sudo chmod +x /usr/local/bin/restore-webserver
 
 # -------------------
 # FINAL OUTPUT
 # -------------------
+
 echo ""
 echo "==============================================="
-echo "            SETUP COMPLETE!"
+echo "     MIGRATION COMPLETE!"
 echo "==============================================="
 echo ""
+echo "✅ Successfully migrated from $WEB_SERVER to Caddy"
+echo "✅ WordPress preserved at: $SELECTED_WP_PATH"
 if [ "$EXISTING_WP" = true ]; then
-    echo "✅ Existing WordPress installation preserved and configured"
-else
-    echo "✅ New WordPress installation completed"
+    echo "✅ Database preserved: $DB_NAME"
 fi
-echo "✅ Caddy reverse proxy with HTTPS configured"
-echo "✅ PHP-FPM optimized for WordPress"
-echo "✅ Firewall configured"
-echo "✅ All services running"
+echo "✅ All configurations backed up to: $BACKUP_DIR"
 echo ""
-echo "📋 CONFIGURATION SUMMARY:"
+echo "📋 MIGRATION SUMMARY:"
 echo "==============================================="
 echo "Primary Domain: https://$DOMAIN"
-echo "WordPress Path: $WP_PATH"
+echo "Additional Domains: ${UNIQUE_DOMAINS[*]}"
+echo "WordPress Path: $SELECTED_WP_PATH"
+echo "PHP Version: $PHP_VERSION"
+echo "PHP Socket: $PHP_SOCKET"
 echo ""
-echo "Subdomains:"
-echo "  • https://erp.$DOMAIN"
-echo "  • https://docs.$DOMAIN"
-echo "  • https://mail.$DOMAIN"
-echo "  • https://nomogrow.$DOMAIN"
-echo "  • https://ventura-tech.$DOMAIN"
+echo "🔗 ACCESS LINKS:"
+echo "  • WordPress Site: https://$DOMAIN"
+echo "  • Migration Test: https://$DOMAIN/migration-test.html"
+echo "  • WordPress Admin: https://$DOMAIN/wp-admin"
+echo "  • Health Check: https://health.$DOMAIN"
 echo ""
-if [ "$NEW_WP_INSTALL" = true ]; then
-    echo "🔐 NEW WORDPRESS CREDENTIALS:"
-    echo "  Admin URL: https://$DOMAIN/wp-admin"
-    echo "  Username: $WP_ADMIN_USER"
-    echo "  Password: $WP_ADMIN_PASSWORD"
-    echo ""
-    echo "📊 DATABASE INFO (saved to /root/.wordpress_db_info):"
-    echo "  Database: $DB_NAME"
-    echo "  Username: $DB_USER"
-    echo "  Password: $DB_PASSWORD"
-else
-    echo "🔐 EXISTING WORDPRESS PRESERVED"
-    echo "  Using existing database and credentials"
-    echo "  Admin URL: https://$DOMAIN/wp-admin"
-fi
+echo "🔧 REVERSE PROXY SERVICES:"
+echo "  • ERP: https://erp.$DOMAIN → $ERP_IP:$ERP_PORT"
+echo "  • Docs: https://docs.$DOMAIN → $DOCS_IP:$DOCS_PORT"
+echo "  • Mail: https://mail.$DOMAIN → $MAIL_IP:$MAIL_PORT"
+echo "  • Nomogrow: https://nomogrow.$DOMAIN → $NOMOGROW_IP:$NOMOGROW_PORT"
+echo "  • Ventura-Tech: https://ventura-tech.$DOMAIN → $VENTURA_IP:$VENTURA_PORT"
 echo ""
-echo "⚙️ SERVER INFO:"
-echo "  Server IP: $THIS_VM_IP"
-echo "  PHP Version: $PHP_VERSION"
-echo "  PHP Socket: $PHP_SOCKET"
+echo "⚙️ MANAGEMENT COMMANDS:"
+echo "  • Check Caddy: sudo systemctl status caddy"
+echo "  • View Caddy logs: sudo journalctl -u caddy -f"
+echo "  • Check PHP-FPM: sudo systemctl status php${PHP_VERSION}-fpm"
+echo "  • Validate config: sudo caddy validate --config /etc/caddy/Caddyfile"
+echo "  • List SSL certs: sudo caddy list-certificates"
+echo "  • Restore old server: sudo restore-webserver $BACKUP_DIR"
 echo ""
-echo "🔧 MANAGEMENT COMMANDS:"
-echo "  • Check status: sudo systemctl status caddy php${PHP_VERSION}-fpm"
-echo "  • View logs: sudo tail -f /var/log/caddy/wordpress.log"
-echo "  • Health check: /usr/local/bin/check-wordpress-health"
-echo "  • Test SSL: sudo caddy list-certificates"
-echo "  • Restart all: sudo systemctl restart caddy php${PHP_VERSION}-fpm"
+echo "📊 BACKUP INFORMATION:"
+echo "  • Location: $BACKUP_DIR"
+echo "  • Contains: Web server config, WordPress files, database dump"
+echo "  • Keep this backup for at least 30 days"
 echo ""
 echo "⚠️ IMPORTANT NEXT STEPS:"
 echo "==============================================="
-echo "1. DNS CONFIGURATION (if not done):"
-echo "   Point all domains to: $THIS_VM_IP"
+echo "1. DNS VERIFICATION:"
+echo "   Ensure DNS records point to: $THIS_VM_IP"
 echo ""
 echo "2. SSL CERTIFICATES:"
-echo "   Let's Encrypt will auto-obtain certificates when DNS is ready"
-echo "   Check: sudo journalctl -u caddy -f"
+echo "   Let's Encrypt will auto-issue certificates"
+echo "   Monitor: sudo journalctl -u caddy -f"
 echo ""
-echo "3. TESTING:"
-echo "   • Visit: https://$DOMAIN/test.php"
-echo "   • Test all subdomains"
-echo "   • Check WordPress admin: https://$DOMAIN/wp-admin"
+echo "3. TEST ALL FUNCTIONALITY:"
+echo "   • Test WordPress admin login"
+echo "   • Test media uploads"
+echo "   • Test plugins and themes"
+echo "   • Test all reverse proxy services"
 echo ""
-echo "4. SECURITY:"
-echo "   • Remove test.php after testing: sudo rm $WP_PATH/test.php"
-echo "   • info.php will auto-remove in 5 minutes"
-echo "   • Change WordPress password if using default"
+echo "4. MONITOR FOR 24 HOURS:"
+echo "   • Check logs: sudo tail -f /var/log/caddy/wordpress.log"
+echo "   • Monitor SSL: sudo caddy list-certificates"
+echo "   • Test performance"
 echo ""
-echo "🔗 QUICK LINKS:"
-echo "  • WordPress: https://$DOMAIN"
-echo "  • Test Page: https://$DOMAIN/test.php"
-echo "  • Health Check: /usr/local/bin/check-wordpress-health"
+echo "5. CLEANUP (after 7 days):"
+echo "   • Remove test files:"
+echo "     sudo rm $SELECTED_WP_PATH/migration-test.html"
+echo "     sudo rm $SELECTED_WP_PATH/migration-info.php"
+echo "   • Consider removing old web server packages"
+echo ""
+echo "🔒 SECURITY NOTES:"
+echo "  • Firewall is configured (ports 80, 443, 22 open)"
+echo "  • PHP-FPM running as www-data"
+echo "  • Caddy running as caddy user"
+echo "  • SSL auto-renewal enabled"
+echo ""
+echo "📞 TROUBLESHOOTING:"
+echo "  • If site doesn't load: Check DNS propagation"
+echo "  • If SSL fails: Ensure port 80 is accessible"
+echo "  • If WordPress broken: Check database connection"
+echo "  • To revert: sudo restore-webserver $BACKUP_DIR"
 echo ""
 echo "==============================================="
-echo "[INFO] Setup completed at $(date)"
-if [ "$NEW_WP_INSTALL" != true ] && [ -n "$BACKUP_DIR" ]; then
-    echo "[INFO] Old WordPress backed up to: $BACKUP_DIR"
-fi
+echo "[SUCCESS] Migration completed at $(date)"
+echo "Backup saved to: $BACKUP_DIR"
 echo "==============================================="
