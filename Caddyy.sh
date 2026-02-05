@@ -442,18 +442,37 @@ echo "[INFO] Caddyfile created for $DOMAIN"
 # MINIMAL FIREWALL
 # -------------------
 
+# -------------------
+# MINIMAL FIREWALL
+# -------------------
+
 echo ""
 echo "[INFO] Configuring minimal firewall..."
-# Only open essential ports
+
+# Reset UFW to ensure a clean state
 sudo ufw --force reset 2>/dev/null || true
+
+# Set default policy to deny all incoming traffic, allow all outgoing traffic
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
+
+# Allow essential ports:
+# - SSH: 22/tcp
+# - HTTP: 80/tcp for Let's Encrypt ACME challenge
+# - HTTPS: 443/tcp for secure communication
+# - Internal network (for communication with other services)
 sudo ufw allow 22/tcp comment 'SSH'
-sudo ufw allow 80/tcp comment 'HTTP for Let'"'"'s Encrypt'
+sudo ufw allow 80/tcp comment 'HTTP for Let's Encrypt'
 sudo ufw allow 443/tcp comment 'HTTPS'
-sudo ufw allow from 192.168.116.0/24 comment 'Internal network'
+sudo ufw allow from 192.168.116.0/24 comment 'Allow internal network'
+
+# Enable UFW with confirmation
 echo "y" | sudo ufw enable 2>/dev/null || true
-echo "[INFO] Firewall configured"
+
+# Display status to confirm
+echo "[INFO] Firewall configured:"
+sudo ufw status verbose
+
 
 # -------------------
 # START SERVICES
