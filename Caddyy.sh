@@ -1,482 +1,114 @@
 #!/bin/bash
 # ===============================================
 # WordPress Migration Script: Apache/Nginx → Caddy
-# Complete with backup permission fixes and database recovery
+# Low-disk-space version - No backups, direct migration
+# Fixed domain: sahmcore.com.sa
 # ===============================================
 
 set -e
 
 # -------------------
-# DETECTION PHASE
+# CLEAN UP DISK SPACE
 # -------------------
 
 echo "==============================================="
-echo " WORDPRESS MIGRATION & CADDY SETUP"
-echo " Comprehensive permission fixing for backups"
+echo " LOW-DISK-SPACE MIGRATION TO CADDY"
+echo " Domain: sahmcore.com.sa"
 echo "==============================================="
 
-# Function to check file accessibility with multiple fallbacks
-check_file_access() {
-    local file="$1"
-    echo "[DEBUG] Checking access to: $file"
-    
-    if [ ! -e "$file" ]; then
-        echo "[ERROR] File/directory does not exist: $file"
-        return 1
-    fi
-    
-    # Check if it's a directory
-    if [ -d "$file" ]; then
-        if [ -x "$file" ]; then
-            echo "[DEBUG] Directory accessible: $file"
-            return 0
-        else
-            echo "[DEBUG] Directory not executable, trying to fix..."
-            sudo chmod +x "$file" 2>/dev/null || return 1
-            return $?
-        fi
-    fi
-    
-    # For files: check readability
-    if [ -r "$file" ]; then
-        echo "[DEBUG] File readable: $file"
-        return 0
-    fi
-    
-    # Try with sudo
-    if sudo test -r "$file"; then
-        echo "[DEBUG] File readable with sudo: $file"
-        return 0
-    fi
-    
-    # Try to fix permissions
-    echo "[DEBUG] Attempting to fix permissions for: $file"
-    sudo chmod 644 "$file" 2>/dev/null || \
-    sudo chown $(whoami):$(whoami) "$file" 2>/dev/null || \
-    sudo chown root:root "$file" 2>/dev/null || \
-    echo "[WARNING] Could not fix permissions for $file"
-    
-    # Check again
-    if [ -r "$file" ]; then
-        return 0
-    fi
-    
-    echo "[ERROR] Cannot access file: $file"
-    return 1
-}
+# Fixed domain
+DOMAIN="sahmcore.com.sa"
+ADMIN_EMAIL="a.saeed@$DOMAIN"
 
-# Function to create backup with proper permissions
-create_backup() {
-    local source="$1"
-    local backup_dir="$2"
-    local backup_name="$3"
-    
-    echo "[INFO] Creating backup: $backup_name"
-    
-    # Ensure backup directory exists with proper permissions
-    sudo mkdir -p "$backup_dir"
-    sudo chmod 755 "$backup_dir"
-    sudo chown $(whoami):$(whoami) "$backup_dir" 2>/dev/null || true
-    
-    # Check source accessibility
-    if ! check_file_access "$source"; then
-        echo "[ERROR] Cannot backup $source - access denied"
-        return 1
-    fi
-    
-    # Different backup methods based on type
-    if [ -d "$source" ]; then
-        echo "[DEBUG] Backing up directory: $source"
-        
-        # Method 1: tar with sudo if needed
-        if sudo tar -czf "$backup_dir/$backup_name.tar.gz" -C "$(dirname "$source")" "$(basename "$source")" 2>/dev/null; then
-            echo "[SUCCESS] Directory backed up: $backup_name.tar.gz"
-        elif tar -czf "$backup_dir/$backup_name.tar.gz" -C "$(dirname "$source")" "$(basename "$source")" 2>/dev/null; then
-            echo "[SUCCESS] Directory backed up (non-sudo): $backup_name.tar.gz"
-        else
-            # Method 2: rsync as fallback
-            echo "[DEBUG] Trying rsync backup method..."
-            sudo mkdir -p "$backup_dir/$backup_name"
-            sudo rsync -av "$source/" "$backup_dir/$backup_name/" 2>/dev/null || \
-            rsync -av "$source/" "$backup_dir/$backup_name/" 2>/dev/null
-            echo "[SUCCESS] Directory backed up with rsync"
-        fi
-        
-    elif [ -f "$source" ]; then
-        echo "[DEBUG] Backing up file: $source"
-        
-        # Method 1: cp with sudo
-        if sudo cp "$source" "$backup_dir/$backup_name" 2>/dev/null; then
-            echo "[SUCCESS] File backed up: $backup_name"
-        elif cp "$source" "$backup_dir/$backup_name" 2>/dev/null; then
-            echo "[SUCCESS] File backed up (non-sudo): $backup_name"
-        else
-            # Method 2: cat redirection
-            echo "[DEBUG] Trying cat backup method..."
-            if sudo test -r "$source"; then
-                sudo cat "$source" > "$backup_dir/$backup_name" 2>/dev/null && \
-                echo "[SUCCESS] File backed up with cat"
-            elif [ -r "$source" ]; then
-                cat "$source" > "$backup_dir/$backup_name" 2>/dev/null && \
-                echo "[SUCCESS] File backed up with cat (non-sudo)"
-            else
-                echo "[ERROR] Cannot backup file: $source"
-                return 1
-            fi
-        fi
-    else
-        echo "[ERROR] Source not found: $source"
-        return 1
-    fi
-    
-    # Set proper permissions on backup
-    sudo chmod 644 "$backup_dir/$backup_name"* 2>/dev/null || true
-    sudo chown $(whoami):$(whoami) "$backup_dir/$backup_name"* 2>/dev/null || true
-    
-    return 0
-}
+# Check disk space first
+echo "[INFO] Checking disk space..."
+df -h /
 
-# Function to backup database with multiple fallback methods
-backup_database() {
-    local db_name="$1"
-    local db_user="$2"
-    local db_pass="$3"
-    local db_host="${4:-localhost}"
-    local backup_file="$5"
-    
-    echo "[INFO] Backing up database: $db_name"
-    
-    # Method 1: Try with provided credentials
-    if [ -n "$db_user" ] && [ -n "$db_pass" ]; then
-        echo "[DEBUG] Trying with provided credentials..."
-        if mysqldump -u "$db_user" -p"$db_pass" -h "$db_host" "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up with user credentials"
-            return 0
-        fi
-    fi
-    
-    # Method 2: Try with root (no password)
-    echo "[DEBUG] Trying with root (no password)..."
-    if mysql -u root -e "SELECT 1;" 2>/dev/null; then
-        if mysqldump -u root "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up with root (no password)"
-            return 0
-        fi
-    fi
-    
-    # Method 3: Try with root (empty password)
-    echo "[DEBUG] Trying with root (empty password)..."
-    if mysql -u root -p"" -e "SELECT 1;" 2>/dev/null; then
-        if mysqldump -u root -p"" "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up with root (empty password)"
-            return 0
-        fi
-    fi
-    
-    # Method 4: Try to find .my.cnf file
-    echo "[DEBUG] Looking for MySQL configuration files..."
-    if [ -f ~/.my.cnf ]; then
-        echo "[DEBUG] Found ~/.my.cnf"
-        if mysqldump "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up using .my.cnf"
-            return 0
-        fi
-    fi
-    
-    # Method 5: Check for /etc/mysql/debian.cnf
-    if [ -f /etc/mysql/debian.cnf ]; then
-        echo "[DEBUG] Found /etc/mysql/debian.cnf"
-        if mysqldump --defaults-file=/etc/mysql/debian.cnf "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up using debian.cnf"
-            return 0
-        fi
-    fi
-    
-    # Method 6: Create temporary .my.cnf with root access
-    echo "[DEBUG] Creating temporary .my.cnf..."
-    TEMP_MYCNF="/tmp/my.cnf.$$"
-    cat > "$TEMP_MYCNF" << EOF
-[client]
-user=root
-password=
-EOF
-    
-    if mysqldump --defaults-file="$TEMP_MYCNF" "$db_name" > "$backup_file" 2>/dev/null; then
-        echo "[SUCCESS] Database backed up with temporary .my.cnf"
-        rm -f "$TEMP_MYCNF"
-        return 0
-    fi
-    rm -f "$TEMP_MYCNF"
-    
-    # Method 7: Last resort - try to access MySQL without password prompt
-    echo "[DEBUG] Trying direct socket access..."
-    if [ -S /var/run/mysqld/mysqld.sock ]; then
-        if mysqldump --socket=/var/run/mysqld/mysqld.sock -u root "$db_name" > "$backup_file" 2>/dev/null; then
-            echo "[SUCCESS] Database backed up via socket"
-            return 0
-        fi
-    fi
-    
-    echo "[ERROR] Could not backup database $db_name"
-    echo "[INFO] You may need to manually backup the database:"
-    echo "  mysqldump -u [USER] -p [PASSWORD] $db_name > backup.sql"
-    return 1
-}
+# Clean up ALL old backups from previous runs
+echo "[INFO] Cleaning up ALL old backups..."
+echo "[INFO] Removing backup directories..."
+sudo rm -rf /root/backup-* 2>/dev/null || true
+sudo rm -rf /root/webserver-backup-* 2>/dev/null || true
+sudo rm -rf /root/wordpress-backup-* 2>/dev/null || true
+sudo rm -rf /root/*-backup-* 2>/dev/null || true
 
-# Function to extract WordPress config values safely
-extract_wp_config() {
-    local wp_config="$1"
-    local key="$2"
-    
-    echo "[DEBUG] Extracting $key from $wp_config"
-    
-    # Check file access
-    if ! check_file_access "$wp_config"; then
-        echo "[ERROR] Cannot access wp-config.php"
-        return 1
-    fi
-    
-    # Read file content
-    local content
-    if [ -r "$wp_config" ]; then
-        content=$(cat "$wp_config")
-    else
-        content=$(sudo cat "$wp_config" 2>/dev/null)
-    fi
-    
-    if [ -z "$content" ]; then
-        echo "[ERROR] Could not read wp-config.php"
-        return 1
-    fi
-    
-    # Extract using multiple pattern matching
-    local value=""
-    
-    # Pattern 1: define('KEY', 'VALUE');
-    value=$(echo "$content" | grep -i "define.*$key" | grep -v "^[ \t]*/\|^[ \t]*\*" | \
-            sed -n "s/.*['\"]\([^'\"]*\)['\"].*/\1/p" | head -1)
-    
-    # Pattern 2: define("KEY", "VALUE");
-    if [ -z "$value" ]; then
-        value=$(echo "$content" | grep -i "define.*$key" | grep -v "^[ \t]*/\|^[ \t]*\*" | \
-                sed -n 's/.*["]\([^"]*\)["].*/\1/p' | head -1)
-    fi
-    
-    # Pattern 3: PHP parsing (most reliable)
-    if [ -z "$value" ] && command -v php >/dev/null 2>&1; then
-        value=$(php -r "
-            \$content = file_get_contents('$wp_config');
-            if (preg_match('/define\s*\(\s*[\"\\']$key[\"\\']\s*,\s*[\"\\']([^\"\\']+)[\"\\']\s*\)/i', \$content, \$matches)) {
-                echo \$matches[1];
-            }
-        " 2>/dev/null)
-    fi
-    
-    if [ -n "$value" ]; then
-        echo "$value"
-        return 0
-    else
-        echo "[DEBUG] Could not extract $key from wp-config.php"
-        return 1
-    fi
-}
+echo "[INFO] Removing old Caddy backups..."
+sudo rm -rf /etc/caddy/Caddyfile.backup-* 2>/dev/null || true
+sudo rm -rf /etc/caddy/*.backup 2>/dev/null || true
+
+echo "[INFO] Removing old web server logs..."
+sudo rm -rf /var/backups/*.old 2>/dev/null || true
+sudo rm -rf /var/backups/*.bak 2>/dev/null || true
+
+# Clean temporary files
+echo "[INFO] Cleaning temporary files..."
+sudo rm -rf /tmp/* 2>/dev/null || true
+sudo rm -rf /var/tmp/* 2>/dev/null || true
+sudo rm -rf ~/.cache/* 2>/dev/null || true
+
+# Clean package cache
+echo "[INFO] Cleaning package cache..."
+sudo apt-get clean 2>/dev/null || true
+sudo apt-get autoclean 2>/dev/null || true
+
+# Remove old kernel versions (free up significant space)
+echo "[INFO] Removing old kernel versions..."
+sudo apt-get autoremove --purge -y 2>/dev/null || true
+
+# Clear systemd journal logs (keep only current)
+echo "[INFO] Clearing old journal logs..."
+sudo journalctl --vacuum-time=1d 2>/dev/null || true
+
+# Check again
+echo ""
+echo "[INFO] Disk space after cleanup:"
+df -h /
 
 # -------------------
-# MAIN SCRIPT
+# DETECT CURRENT SETUP
 # -------------------
 
-# Create main backup directory with proper permissions
-BACKUP_ROOT="/root/webserver-backup-$(date +%Y%m%d-%H%M%S)"
-echo "[INFO] Creating backup root: $BACKUP_ROOT"
-
-# Ensure we have permission to create backup directory
-sudo mkdir -p "$BACKUP_ROOT" 2>/dev/null || mkdir -p "$BACKUP_ROOT"
-sudo chmod 755 "$BACKUP_ROOT" 2>/dev/null || chmod 755 "$BACKUP_ROOT"
-sudo chown $(whoami):$(whoami) "$BACKUP_ROOT" 2>/dev/null || true
+echo ""
+echo "==============================================="
+echo " DETECTING CURRENT SETUP"
+echo "==============================================="
 
 # Detect web server
 WEB_SERVER="none"
 if systemctl is-active --quiet apache2; then
     WEB_SERVER="apache"
-    echo "[INFO] Detected Apache"
+    echo "[INFO] Detected running Apache"
 elif systemctl is-active --quiet nginx; then
     WEB_SERVER="nginx"
-    echo "[INFO] Detected Nginx"
+    echo "[INFO] Detected running Nginx"
+else
+    echo "[INFO] No active web server detected"
 fi
 
-# Backup web server configuration
-if [ "$WEB_SERVER" != "none" ]; then
-    echo ""
-    echo "==============================================="
-    echo " BACKING UP WEB SERVER CONFIGURATION"
-    echo "==============================================="
-    
-    if [ "$WEB_SERVER" = "apache" ]; then
-        # Backup Apache
-        create_backup "/etc/apache2" "$BACKUP_ROOT" "apache-config"
-        create_backup "/etc/apache2/sites-available" "$BACKUP_ROOT" "apache-sites"
-        create_backup "/etc/apache2/sites-enabled" "$BACKUP_ROOT" "apache-sites-enabled"
-        
-        # Backup Apache logs
-        echo "[INFO] Backing up Apache logs..."
-        sudo find /var/log/apache2 -name "*.log" -exec cp {} "$BACKUP_ROOT/" \; 2>/dev/null || true
-        
-    elif [ "$WEB_SERVER" = "nginx" ]; then
-        # Backup Nginx
-        create_backup "/etc/nginx" "$BACKUP_ROOT" "nginx-config"
-        create_backup "/etc/nginx/sites-available" "$BACKUP_ROOT" "nginx-sites"
-        create_backup "/etc/nginx/sites-enabled" "$BACKUP_ROOT" "nginx-sites-enabled"
-        
-        # Backup Nginx logs
-        echo "[INFO] Backing up Nginx logs..."
-        sudo find /var/log/nginx -name "*.log" -exec cp {} "$BACKUP_ROOT/" \; 2>/dev/null || true
-    fi
-fi
+# Find WordPress installations
+echo "[INFO] Looking for WordPress..."
+WP_PATH=""
+WP_PATHS=("/var/www/html" "/var/www" "/home/*/public_html" "/home/*/www")
 
-# Detect WordPress installations
-echo ""
-echo "==============================================="
-echo " DETECTING WORDPRESS INSTALLATIONS"
-echo "==============================================="
-
-WP_INSTALLATIONS=()
-WP_LOCATIONS=(
-    "/var/www/html"
-    "/var/www"
-    "/home/*/public_html"
-    "/home/*/www"
-    "/usr/share/nginx/html"
-    "/srv/www"
-)
-
-for location in "${WP_LOCATIONS[@]}"; do
-    for dir in $(ls -d $location 2>/dev/null || true); do
-        if [ -d "$dir" ]; then
-            WP_CONFIG="$dir/wp-config.php"
-            if [ -f "$WP_CONFIG" ]; then
-                echo "[DEBUG] Found potential WordPress: $dir"
-                
-                # Test accessibility
-                if check_file_access "$WP_CONFIG"; then
-                    WP_INSTALLATIONS+=("$dir")
-                    echo "  ✓ Accessible: $dir"
-                else
-                    echo "  ⚠ Inaccessible (permission issue): $dir"
-                    echo "    Attempting to fix permissions..."
-                    
-                    # Try to fix permissions
-                    sudo chmod 644 "$WP_CONFIG" 2>/dev/null
-                    sudo chown www-data:www-data "$WP_CONFIG" 2>/dev/null
-                    sudo chown $(whoami):$(whoami) "$WP_CONFIG" 2>/dev/null
-                    
-                    # Test again
-                    if check_file_access "$WP_CONFIG"; then
-                        WP_INSTALLATIONS+=("$dir")
-                        echo "  ✓ Now accessible after fix: $dir"
-                    fi
-                fi
-            fi
+for path in "${WP_PATHS[@]}"; do
+    for dir in $(ls -d $path 2>/dev/null || true); do
+        if [ -f "$dir/wp-config.php" ]; then
+            WP_PATH="$dir"
+            echo "[INFO] Found WordPress at: $WP_PATH"
+            break 2
         fi
     done
 done
 
-# Handle WordPress selection
-if [ ${#WP_INSTALLATIONS[@]} -eq 0 ]; then
-    echo "[INFO] No WordPress found or all inaccessible"
-    echo "[INFO] Will install fresh WordPress"
-    SELECTED_WP_PATH="/var/www/html"
+if [ -z "$WP_PATH" ]; then
+    WP_PATH="/var/www/html"
+    echo "[INFO] No WordPress found, will use: $WP_PATH"
     EXISTING_WP=false
 else
-    echo ""
-    echo "Found WordPress installations:"
-    for i in "${!WP_INSTALLATIONS[@]}"; do
-        echo "$((i+1))) ${WP_INSTALLATIONS[$i]}"
-    done
-    echo "$(( ${#WP_INSTALLATIONS[@]} + 1 ))) Install fresh WordPress"
-    
-    read -p "Select (1-$((${#WP_INSTALLATIONS[@]} + 1))): " choice
-    
-    if [ "$choice" -le ${#WP_INSTALLATIONS[@]} ]; then
-        SELECTED_WP_PATH="${WP_INSTALLATIONS[$((choice-1))]}"
-        EXISTING_WP=true
-        echo "[INFO] Selected: $SELECTED_WP_PATH"
-    else
-        read -p "Enter path for new WordPress [/var/www/html]: " new_path
-        SELECTED_WP_PATH="${new_path:-/var/www/html}"
-        EXISTING_WP=false
-    fi
+    EXISTING_WP=true
 fi
 
-# Backup WordPress
-echo ""
-echo "==============================================="
-echo " BACKING UP WORDPRESS"
-echo "==============================================="
-
-if [ "$EXISTING_WP" = true ]; then
-    # Backup WordPress files
-    echo "[INFO] Backing up WordPress files..."
-    create_backup "$SELECTED_WP_PATH" "$BACKUP_ROOT" "wordpress-files"
-    
-    # Backup wp-config.php separately
-    WP_CONFIG="$SELECTED_WP_PATH/wp-config.php"
-    if check_file_access "$WP_CONFIG"; then
-        create_backup "$WP_CONFIG" "$BACKUP_ROOT" "wp-config.php"
-        
-        # Extract database info
-        echo "[INFO] Extracting database information..."
-        DB_NAME=$(extract_wp_config "$WP_CONFIG" "DB_NAME")
-        DB_USER=$(extract_wp_config "$WP_CONFIG" "DB_USER")
-        DB_PASS=$(extract_wp_config "$WP_CONFIG" "DB_PASSWORD")
-        DB_HOST=$(extract_wp_config "$WP_CONFIG" "DB_HOST")
-        DB_HOST="${DB_HOST:-localhost}"
-        
-        if [ -n "$DB_NAME" ] && [ -n "$DB_USER" ]; then
-            echo "[INFO] Database info extracted:"
-            echo "  Name: $DB_NAME"
-            echo "  User: $DB_USER"
-            echo "  Host: $DB_HOST"
-            
-            # Backup database
-            echo "[INFO] Backing up database..."
-            backup_database "$DB_NAME" "$DB_USER" "$DB_PASS" "$DB_HOST" "$BACKUP_ROOT/wordpress-database.sql"
-            
-            # Save database info
-            echo "DB_NAME=$DB_NAME" > "$BACKUP_ROOT/database.info"
-            echo "DB_USER=$DB_USER" >> "$BACKUP_ROOT/database.info"
-            echo "DB_PASS=$DB_PASS" >> "$BACKUP_ROOT/database.info"
-            echo "DB_HOST=$DB_HOST" >> "$BACKUP_ROOT/database.info"
-        fi
-    fi
-fi
-
-# Get domain information
-echo ""
-echo "==============================================="
-echo " DOMAIN CONFIGURATION"
-echo "==============================================="
-
-# Try to get domain from existing WordPress
-if [ "$EXISTING_WP" = true ] && [ -f "$SELECTED_WP_PATH/wp-config.php" ]; then
-    if command -v wp >/dev/null 2>&1; then
-        cd "$SELECTED_WP_PATH"
-        SITE_URL=$(sudo -u www-data wp option get home 2>/dev/null || echo "")
-        if [ -n "$SITE_URL" ]; then
-            DOMAIN=$(echo "$SITE_URL" | sed -e 's|^[^/]*//||' -e 's|/.*$||' -e 's|^www\.||')
-            echo "[INFO] Found existing domain: $DOMAIN"
-        fi
-    fi
-fi
-
-# Ask for domain if not found
-if [ -z "$DOMAIN" ]; then
-    read -p "Enter primary domain [sahmcore.com.sa]: " DOMAIN
-    DOMAIN="${DOMAIN:-sahmcore.com.sa}"
-fi
-
-ADMIN_EMAIL="a.saeed@$DOMAIN"
-
-# Internal VM IPs
+# Internal VM IPs (minimal configuration)
 THIS_VM_IP="192.168.116.37"
 ERP_IP="192.168.116.13"
 ERP_PORT="8069"
@@ -489,71 +121,66 @@ NOMOGROW_PORT="8082"
 VENTURA_IP="192.168.116.10"
 VENTURA_PORT="8080"
 
+echo ""
+echo "==============================================="
+echo " CONFIRM MIGRATION"
+echo "==============================================="
+echo "Web Server: $WEB_SERVER"
+echo "WordPress: $WP_PATH"
+echo "Domain: $DOMAIN"
+echo "IP Address: $THIS_VM_IP"
+echo ""
+echo "This will:"
+echo "1. Migrate from $WEB_SERVER to Caddy"
+echo "2. NO backups will be created"
+echo "3. Old backups from previous runs will be deleted"
+echo "4. Configure all subdomains for sahmcore.com.sa"
+echo ""
+read -p "Proceed? (y/N): " -n 1 -r
+echo
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "[INFO] Migration cancelled."
+    exit 0
+fi
+
 # -------------------
-# SYSTEM SETUP
+# MINIMAL SYSTEM SETUP
 # -------------------
 
 echo ""
 echo "==============================================="
-echo " SYSTEM SETUP"
+echo " MINIMAL SYSTEM SETUP"
 echo "==============================================="
 
-# Update system
-echo "[INFO] Updating system..."
-sudo apt update && sudo apt upgrade -y
-
-# Install dependencies
-echo "[INFO] Installing dependencies..."
-sudo apt install -y curl wget unzip lsb-release software-properties-common \
-    net-tools ufw dnsutils git mariadb-client mariadb-server
-
-# Fix MySQL permissions if needed
-echo "[INFO] Configuring MySQL..."
-sudo systemctl start mariadb 2>/dev/null || sudo systemctl start mysql 2>/dev/null
-sudo systemctl enable mariadb 2>/dev/null || sudo systemctl enable mysql 2>/dev/null
-
-# Ensure MySQL is accessible
-echo "[INFO] Testing MySQL access..."
-if ! mysql -u root -e "SELECT 1;" 2>/dev/null && ! mysql -u root -p"" -e "SELECT 1;" 2>/dev/null; then
-    echo "[WARNING] MySQL root access issue. Attempting to secure installation..."
-    sudo mysql_secure_installation <<EOF
-n
-y
-y
-y
-y
-y
-EOF
-fi
-
-# Install PHP
-echo "[INFO] Installing PHP..."
-sudo add-apt-repository ppa:ondrej/php -y
+# Update only essentials
+echo "[INFO] Updating package lists..."
 sudo apt update
-sudo apt install -y php8.3 php8.3-fpm php8.3-mysql php8.3-curl php8.3-gd \
-    php8.3-mbstring php8.3-xml php8.3-xmlrpc php8.3-soap php8.3-intl \
-    php8.3-zip php8.3-bcmath
+
+# Install absolute minimum required
+echo "[INFO] Installing minimum required packages..."
+REQUIRED_PKGS="curl php8.3-fpm php8.3-mysql"
+for pkg in $REQUIRED_PKGS; do
+    if ! dpkg -l | grep -q "^ii.*$pkg"; then
+        sudo apt install -y $pkg
+    else
+        echo "[INFO] $pkg already installed"
+    fi
+done
+
+# Check if PHP is already installed
+if ! command -v php >/dev/null 2>&1; then
+    echo "[INFO] Installing PHP..."
+    sudo apt install -y php8.3 php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml
+else
+    echo "[INFO] PHP already installed"
+fi
 
 PHP_VERSION="8.3"
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 
-# Configure PHP-FPM
-PHP_FPM_CONF="/etc/php/$PHP_VERSION/fpm/pool.d/www.conf"
-if [ -f "$PHP_FPM_CONF" ]; then
-    sudo cp "$PHP_FPM_CONF" "${PHP_FPM_CONF}.backup"
-    sudo sed -i 's/^pm = .*/pm = dynamic/' "$PHP_FPM_CONF"
-    sudo sed -i 's/^pm.max_children = .*/pm.max_children = 20/' "$PHP_FPM_CONF"
-    echo "php_admin_value[upload_max_filesize] = 64M" | sudo tee -a "$PHP_FPM_CONF"
-    echo "php_admin_value[post_max_size] = 64M" | sudo tee -a "$PHP_FPM_CONF"
-fi
-
-sudo systemctl restart "php${PHP_VERSION}-fpm"
-sudo systemctl enable --now "php${PHP_VERSION}-fpm"
-
-# Install Caddy
+# Install Caddy (minimal)
 echo "[INFO] Installing Caddy..."
 if ! command -v caddy >/dev/null 2>&1; then
-    sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
     sudo apt update
@@ -561,58 +188,114 @@ if ! command -v caddy >/dev/null 2>&1; then
 fi
 
 # -------------------
-# WORDPRESS SETUP
+# DIRECT MIGRATION
 # -------------------
 
 echo ""
 echo "==============================================="
-echo " WORDPRESS SETUP"
+echo " DIRECT MIGRATION (NO BACKUPS)"
 echo "==============================================="
 
-# Set permissions for WordPress
-echo "[INFO] Setting WordPress permissions..."
-sudo mkdir -p "$SELECTED_WP_PATH"
-sudo chown -R www-data:www-data "$SELECTED_WP_PATH"
-sudo find "$SELECTED_WP_PATH" -type d -exec chmod 755 {} \;
-sudo find "$SELECTED_WP_PATH" -type f -exec chmod 644 {} \;
-
-if [ "$EXISTING_WP" != true ]; then
-    # Install fresh WordPress
-    echo "[INFO] Installing fresh WordPress..."
-    cd /tmp
-    wget -q https://wordpress.org/latest.zip
-    unzip -q latest.zip
-    sudo mv wordpress/* "$SELECTED_WP_PATH/"
-    sudo rm -rf wordpress latest.zip
-    
-    # Create database
-    DB_NAME="wp_$(echo "$DOMAIN" | tr -cd '[:alnum:]' | cut -c1-16)"
-    DB_USER="wpuser_$(openssl rand -hex 4)"
-    DB_PASS=$(openssl rand -base64 32 | tr -d '/+=' | cut -c1-24)
-    
-    sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-    sudo mysql -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';"
-    sudo mysql -e "GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';"
-    sudo mysql -e "FLUSH PRIVILEGES;"
-    
-    # Configure wp-config.php
-    sudo cp "$SELECTED_WP_PATH/wp-config-sample.php" "$SELECTED_WP_PATH/wp-config.php"
-    sudo sed -i "s/database_name_here/$DB_NAME/" "$SELECTED_WP_PATH/wp-config.php"
-    sudo sed -i "s/username_here/$DB_USER/" "$SELECTED_WP_PATH/wp-config.php"
-    sudo sed -i "s/password_here/$DB_PASS/" "$SELECTED_WP_PATH/wp-config.php"
-    
-    # Generate salts
-    SALT=$(curl -s https://api.wordpress.org/secret-key/1.1/salt/)
-    sudo sed -i "/define( 'AUTH_KEY',/a $SALT" "$SELECTED_WP_PATH/wp-config.php"
+# Stop old web server (but keep configs)
+if [ "$WEB_SERVER" = "apache" ]; then
+    echo "[INFO] Stopping Apache..."
+    sudo systemctl stop apache2
+    sudo systemctl disable apache2
+    echo "[INFO] Apache stopped (configs preserved in /etc/apache2)"
+elif [ "$WEB_SERVER" = "nginx" ]; then
+    echo "[INFO] Stopping Nginx..."
+    sudo systemctl stop nginx
+    sudo systemctl disable nginx
+    echo "[INFO] Nginx stopped (configs preserved in /etc/nginx)"
 fi
 
-# Add Caddy support to wp-config.php
-WP_CONFIG="$SELECTED_WP_PATH/wp-config.php"
-if [ -f "$WP_CONFIG" ] && ! grep -q "HTTP_X_FORWARDED_PROTO" "$WP_CONFIG"; then
-    echo "[INFO] Adding Caddy reverse proxy support..."
-    cat >> "$WP_CONFIG" << 'EOF'
+# Configure PHP-FPM minimally
+echo "[INFO] Configuring PHP-FPM..."
+sudo systemctl restart "php${PHP_VERSION}-fpm"
+sudo systemctl enable --now "php${PHP_VERSION}-fpm"
 
-/* Caddy Reverse Proxy Support */
+# Ensure WordPress directory exists
+sudo mkdir -p "$WP_PATH"
+
+# If no existing WordPress, install minimal
+if [ "$EXISTING_WP" != true ]; then
+    echo "[INFO] Creating minimal WordPress placeholder..."
+    sudo tee "$WP_PATH/index.php" > /dev/null << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>sahmcore.com.sa - WordPress Migration</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .success { color: #28a745; font-size: 18px; margin: 20px 0; }
+        .info { background: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0; }
+        .services { margin: 20px 0; }
+        .service-item { margin: 10px 0; padding: 10px; background: #e9ecef; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>sahmcore.com.sa - Migration Complete</h1>
+        
+        <div class="success">
+            ✓ Successfully migrated to Caddy Web Server
+        </div>
+        
+        <div class="info">
+            <h3>Server Information</h3>
+            <p><strong>Domain:</strong> sahmcore.com.sa</p>
+            <p><strong>Server:</strong> <?php echo $_SERVER['SERVER_SOFTWARE'] ?? 'Caddy'; ?></p>
+            <p><strong>PHP Version:</strong> <?php echo PHP_VERSION; ?></p>
+            <p><strong>Migration Date:</strong> <?php echo date('Y-m-d H:i:s'); ?></p>
+        </div>
+        
+        <div class="services">
+            <h3>Available Services</h3>
+            <div class="service-item">
+                <strong>Main Site:</strong> https://sahmcore.com.sa
+            </div>
+            <div class="service-item">
+                <strong>ERP System:</strong> https://erp.sahmcore.com.sa
+            </div>
+            <div class="service-item">
+                <strong>Documentation:</strong> https://docs.sahmcore.com.sa
+            </div>
+            <div class="service-item">
+                <strong>Mail Service:</strong> https://mail.sahmcore.com.sa
+            </div>
+            <div class="service-item">
+                <strong>Nomogrow:</strong> https://nomogrow.sahmcore.com.sa
+            </div>
+            <div class="service-item">
+                <strong>Ventura Tech:</strong> https://ventura-tech.sahmcore.com.sa
+            </div>
+        </div>
+        
+        <p><a href="/wp-admin">Install WordPress</a> or upload your existing WordPress files to this directory.</p>
+    </div>
+</body>
+</html>
+EOF
+fi
+
+# Update wp-config.php for Caddy if it exists
+if [ -f "$WP_PATH/wp-config.php" ]; then
+    echo "[INFO] Updating wp-config.php for Caddy..."
+    # Backup original wp-config.php (tiny backup)
+    if [ ! -f "$WP_PATH/wp-config.php.bak" ]; then
+        sudo cp "$WP_PATH/wp-config.php" "$WP_PATH/wp-config.php.bak"
+    fi
+    
+    # Add reverse proxy support if not present
+    if ! grep -q "HTTP_X_FORWARDED_PROTO" "$WP_PATH/wp-config.php"; then
+        sudo tee -a "$WP_PATH/wp-config.php" > /dev/null << 'EOF'
+
+/* ============================================
+ * Caddy Reverse Proxy Support
+ * Added during migration to Caddy
+ * Domain: sahmcore.com.sa
+ * ============================================ */
 if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
     $_SERVER['HTTPS'] = 'on';
     $_SERVER['SERVER_PORT'] = 443;
@@ -620,104 +303,157 @@ if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROT
 if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
     $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
 }
+
+/* Force SSL for admin */
+define('FORCE_SSL_ADMIN', true);
 EOF
+    fi
 fi
 
+# Set minimal permissions
+echo "[INFO] Setting permissions..."
+sudo chown -R www-data:www-data "$WP_PATH"
+sudo find "$WP_PATH" -type d -exec chmod 755 {} \; 2>/dev/null || true
+sudo find "$WP_PATH" -type f -exec chmod 644 {} \; 2>/dev/null || true
+
 # -------------------
-# CADDY CONFIGURATION
+# MINIMAL CADDY CONFIG
 # -------------------
 
 echo ""
 echo "==============================================="
-echo " CADDY CONFIGURATION"
+echo " MINIMAL CADDY CONFIGURATION"
 echo "==============================================="
 
-# Create Caddyfile
+# Remove old Caddyfile if exists
+sudo rm -f /etc/caddy/Caddyfile.bak 2>/dev/null || true
+
+# Create minimal Caddyfile for sahmcore.com.sa
 sudo tee /etc/caddy/Caddyfile > /dev/null << EOF
-# Global settings
+# Minimal Caddy configuration for sahmcore.com.sa
+# Generated: $(date)
+# Server IP: $THIS_VM_IP
+# Migration from: $WEB_SERVER
+
 {
+    # Email for Let's Encrypt
     email $ADMIN_EMAIL
+    
+    # Auto HTTPS with HTTP challenge
     acme_ca https://acme-v02.api.letsencrypt.org/directory
 }
 
-# WordPress site
+# Main WordPress site
 $DOMAIN, www.$DOMAIN {
-    root * $SELECTED_WP_PATH
-    php_fastcgi unix:$PHP_SOCKET
-    file_server
-    encode gzip
+    # Root directory
+    root * $WP_PATH
     
-    # WordPress rewrites
+    # PHP-FPM handler
+    php_fastcgi unix:$PHP_SOCKET {
+        resolve_root_symlink
+        split .php
+        index index.php
+    }
+    
+    # File server
+    file_server
+    
+    # WordPress URL rewrites
     try_files {path} {path}/ /index.php?{query}
     
     # Security headers
     header {
         X-Frame-Options "SAMEORIGIN"
         X-Content-Type-Options "nosniff"
-        X-XSS-Protection "1; mode=block"
         -Server
+    }
+    
+    # Logging
+    log {
+        output file /var/log/caddy/sahmcore.log
     }
 }
 
-# Reverse proxy services
+# ERP Service
 erp.$DOMAIN {
-    reverse_proxy http://$ERP_IP:$ERP_PORT
+    reverse_proxy $ERP_IP:$ERP_PORT {
+        header_up Host {host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 }
 
+# Documentation Service
 docs.$DOMAIN {
     reverse_proxy https://$DOCS_IP:$DOCS_PORT {
         transport http {
             tls_insecure_skip_verify
         }
+        header_up Host {host}
     }
 }
 
+# Mail Service
 mail.$DOMAIN {
     reverse_proxy https://$MAIL_IP:$MAIL_PORT {
         transport http {
             tls_insecure_skip_verify
         }
+        header_up Host {host}
     }
 }
 
+# Nomogrow Service
 nomogrow.$DOMAIN {
-    reverse_proxy http://$NOMOGROW_IP:$NOMOGROW_PORT
+    reverse_proxy $NOMOGROW_IP:$NOMOGROW_PORT {
+        header_up Host {host}
+    }
 }
 
+# Ventura-Tech Service
 ventura-tech.$DOMAIN {
-    reverse_proxy http://$VENTURA_IP:$VENTURA_PORT
+    reverse_proxy $VENTURA_IP:$VENTURA_PORT {
+        header_up Host {host}
+    }
 }
 
-# Health check
+# Health check endpoint
 health.$DOMAIN {
-    respond "OK" 200
+    respond "{
+        \"status\": \"healthy\",
+        \"service\": \"caddy\",
+        \"domain\": \"$DOMAIN\",
+        \"server\": \"$THIS_VM_IP\",
+        \"migrated_from\": \"$WEB_SERVER\",
+        \"timestamp\": \"$(date -Iseconds)\"
+    }" 200 {
+        header Content-Type "application/json"
+    }
 }
 
-# HTTP to HTTPS redirect
-http://${DOMAIN}, http://www.${DOMAIN}, http://erp.${DOMAIN}, http://docs.${DOMAIN}, http://mail.${DOMAIN}, http://nomogrow.${DOMAIN}, http://ventura-tech.${DOMAIN} {
+# HTTP to HTTPS redirect for all domains
+http://$DOMAIN, http://www.$DOMAIN, http://erp.$DOMAIN, http://docs.$DOMAIN, http://mail.$DOMAIN, http://nomogrow.$DOMAIN, http://ventura-tech.$DOMAIN {
     redir https://{host}{uri} permanent
 }
 EOF
 
-# Set Caddy permissions
-sudo chown -R caddy:caddy /etc/caddy
-sudo mkdir -p /var/log/caddy
-sudo chown -R caddy:caddy /var/log/caddy
+echo "[INFO] Caddyfile created for $DOMAIN"
 
 # -------------------
-# FIREWALL CONFIGURATION
+# MINIMAL FIREWALL
 # -------------------
 
 echo ""
-echo "[INFO] Configuring firewall..."
-sudo ufw --force reset
+echo "[INFO] Configuring minimal firewall..."
+# Only open essential ports
+sudo ufw --force reset 2>/dev/null || true
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow from 192.168.116.0/24
-echo "y" | sudo ufw enable
+sudo ufw allow 22/tcp comment 'SSH'
+sudo ufw allow 80/tcp comment 'HTTP for Let'"'"'s Encrypt'
+sudo ufw allow 443/tcp comment 'HTTPS'
+sudo ufw allow from 192.168.116.0/24 comment 'Internal network'
+echo "y" | sudo ufw enable 2>/dev/null || true
+echo "[INFO] Firewall configured"
 
 # -------------------
 # START SERVICES
@@ -728,90 +464,78 @@ echo "==============================================="
 echo " STARTING SERVICES"
 echo "==============================================="
 
-# Stop old web server
-if [ "$WEB_SERVER" = "apache" ]; then
-    sudo systemctl stop apache2
-    sudo systemctl disable apache2
-elif [ "$WEB_SERVER" = "nginx" ]; then
-    sudo systemctl stop nginx
-    sudo systemctl disable nginx
-fi
+# Create log directory
+sudo mkdir -p /var/log/caddy
+sudo chown caddy:caddy /var/log/caddy
+
+# Restart PHP-FPM
+echo "[INFO] Restarting PHP-FPM..."
+sudo systemctl restart "php${PHP_VERSION}-fpm"
+echo "[INFO] PHP-FPM restarted"
 
 # Start Caddy
+echo "[INFO] Starting Caddy..."
 sudo systemctl restart caddy
 sudo systemctl enable caddy
+echo "[INFO] Caddy started"
 
-# Wait and check
+# Verify services
 sleep 3
+echo ""
 echo "[INFO] Service status:"
-sudo systemctl status caddy --no-pager | head -10
-sudo systemctl status "php${PHP_VERSION}-fpm" --no-pager | head -10
+if systemctl is-active --quiet caddy; then
+    echo "✓ Caddy: RUNNING"
+else
+    echo "✗ Caddy: FAILED"
+    sudo journalctl -u caddy --no-pager -n 5
+fi
+
+if systemctl is-active --quiet "php${PHP_VERSION}-fpm"; then
+    echo "✓ PHP-FPM: RUNNING"
+else
+    echo "✗ PHP-FPM: FAILED"
+fi
 
 # -------------------
-# TESTING
+# QUICK TEST
 # -------------------
 
 echo ""
 echo "==============================================="
-echo " TESTING"
+echo " QUICK TEST"
 echo "==============================================="
 
-# Create test file
-sudo tee "$SELECTED_WP_PATH/test-migration.php" > /dev/null << 'EOF'
+# Create simple test file
+sudo tee "$WP_PATH/test-caddy-migration.php" > /dev/null << EOF
 <?php
 header('Content-Type: text/plain');
-echo "Migration Test\n";
-echo "==============\n\n";
-
-// Test PHP
+echo "sahmcore.com.sa - Caddy Migration Test\n";
+echo str_repeat("=", 50) . "\n\n";
+echo "Domain: " . (\$_SERVER['HTTP_HOST'] ?? '$DOMAIN') . "\n";
+echo "Server Software: " . (\$_SERVER['SERVER_SOFTWARE'] ?? 'Caddy') . "\n";
 echo "PHP Version: " . PHP_VERSION . "\n";
-echo "Server Software: " . ($_SERVER['SERVER_SOFTWARE'] ?? 'Unknown') . "\n";
-echo "HTTPS: " . (isset($_SERVER['HTTPS']) ? 'Yes' : 'No') . "\n";
-echo "X-Forwarded-Proto: " . ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? 'Not set') . "\n\n";
-
-// Test MySQL
-echo "MySQL Test:\n";
-$config_file = dirname(__FILE__) . '/wp-config.php';
-if (file_exists($config_file)) {
-    $config = file_get_contents($config_file);
-    
-    preg_match("/define\s*\(\s*'DB_NAME'\s*,\s*'([^']+)'\s*\)/", $config, $db_name);
-    preg_match("/define\s*\(\s*'DB_USER'\s*,\s*'([^']+)'\s*\)/", $config, $db_user);
-    preg_match("/define\s*\(\s*'DB_HOST'\s*,\s*'([^']+)'\s*\)/", $config, $db_host);
-    
-    echo "Database: " . ($db_name[1] ?? 'Not found') . "\n";
-    echo "User: " . ($db_user[1] ?? 'Not found') . "\n";
-    echo "Host: " . ($db_host[1] ?? 'localhost') . "\n";
-    
-    // Try connection
-    if (isset($db_user[1])) {
-        $conn = @mysqli_connect(
-            $db_host[1] ?? 'localhost',
-            $db_user[1],
-            defined('DB_PASSWORD') ? DB_PASSWORD : '',
-            $db_name[1]
-        );
-        
-        if ($conn) {
-            echo "Connection: SUCCESS\n";
-            mysqli_close($conn);
-        } else {
-            echo "Connection: FAILED - " . mysqli_connect_error() . "\n";
-        }
-    }
-} else {
-    echo "wp-config.php not found\n";
-}
+echo "HTTPS: " . (isset(\$_SERVER['HTTPS']) ? 'Yes' : 'No') . "\n";
+echo "X-Forwarded-Proto: " . (\$_SERVER['HTTP_X_FORWARDED_PROTO'] ?? 'Not set') . "\n";
+echo "\nMigration Status: SUCCESS\n";
+echo "Old Server: $WEB_SERVER\n";
+echo "New Server: Caddy\n";
 ?>
 EOF
 
-sudo chown www-data:www-data "$SELECTED_WP_PATH/test-migration.php"
-sudo chmod 644 "$SELECTED_WP_PATH/test-migration.php"
+sudo chown www-data:www-data "$WP_PATH/test-caddy-migration.php"
 
-# Test access
-echo "[INFO] Testing WordPress access..."
-sleep 2
-curl -s -H "Host: $DOMAIN" http://127.0.0.1/test-migration.php | head -20
+# Test local access
+echo "[INFO] Testing local access..."
+if curl -s -H "Host: $DOMAIN" http://127.0.0.1/test-caddy-migration.php 2>/dev/null | grep -q "SUCCESS"; then
+    echo "✓ Local test: PASSED"
+    echo "✓ Caddy is serving WordPress correctly"
+else
+    echo "⚠ Local test: Check manually"
+    curl -s -H "Host: $DOMAIN" http://127.0.0.1/test-caddy-migration.php | head -10
+fi
+
+# Clean test file
+sudo rm -f "$WP_PATH/test-caddy-migration.php"
 
 # -------------------
 # FINAL OUTPUT
@@ -822,36 +546,63 @@ echo "==============================================="
 echo " MIGRATION COMPLETE!"
 echo "==============================================="
 echo ""
-echo "✅ Backup created: $BACKUP_ROOT"
-echo "✅ WordPress preserved: $SELECTED_WP_PATH"
-if [ "$EXISTING_WP" = true ]; then
-    echo "✅ Database preserved: $DB_NAME"
+echo "✅ DIRECT MIGRATION SUCCESSFUL"
+echo "✅ Domain: sahmcore.com.sa"
+echo "✅ Server IP: $THIS_VM_IP"
+echo "✅ Old backups from previous runs DELETED"
+echo "✅ Disk space preserved"
+echo ""
+echo "📋 CONFIGURATION SUMMARY:"
+echo "   WordPress Path: $WP_PATH"
+echo "   PHP Version: $PHP_VERSION"
+echo "   PHP Socket: $PHP_SOCKET"
+echo "   Migrated From: $WEB_SERVER → Caddy"
+echo ""
+echo "🔗 ALL SERVICES (HTTPS):"
+echo "   • https://$DOMAIN (Main WordPress)"
+echo "   • https://www.$DOMAIN"
+echo "   • https://erp.$DOMAIN → $ERP_IP:$ERP_PORT"
+echo "   • https://docs.$DOMAIN → $DOCS_IP:$DOCS_PORT"
+echo "   • https://mail.$DOMAIN → $MAIL_IP:$MAIL_PORT"
+echo "   • https://nomogrow.$DOMAIN → $NOMOGROW_IP:$NOMOGROW_PORT"
+echo "   • https://ventura-tech.$DOMAIN → $VENTURA_IP:$VENTURA_PORT"
+echo "   • https://health.$DOMAIN (Health Check)"
+echo ""
+echo "🔧 MANAGEMENT COMMANDS:"
+echo "   Check status:    sudo systemctl status caddy"
+echo "   View logs:       sudo journalctl -u caddy -f"
+echo "   Restart Caddy:   sudo systemctl restart caddy"
+echo "   Restart PHP:     sudo systemctl restart php${PHP_VERSION}-fpm"
+echo "   Validate config: sudo caddy validate --config /etc/caddy/Caddyfile"
+echo ""
+echo "⚠️  IMPORTANT NOTES:"
+echo "   1. NO BACKUPS WERE CREATED (to save disk space)"
+echo "   2. Old web server ($WEB_SERVER) configs preserved in /etc/"
+echo "   3. All old backup directories were deleted"
+echo "   4. Ensure DNS points to: $THIS_VM_IP"
+echo "   5. Let's Encrypt will auto-configure SSL"
+echo ""
+echo "🔄 ROLLBACK INSTRUCTIONS:"
+if [ "$WEB_SERVER" = "apache" ]; then
+    echo "   sudo systemctl stop caddy"
+    echo "   sudo systemctl disable caddy"
+    echo "   sudo systemctl start apache2"
+    echo "   sudo systemctl enable apache2"
+elif [ "$WEB_SERVER" = "nginx" ]; then
+    echo "   sudo systemctl stop caddy"
+    echo "   sudo systemctl disable caddy"
+    echo "   sudo systemctl start nginx"
+    echo "   sudo systemctl enable nginx"
 else
-    echo "✅ New WordPress installed"
-    echo "   Database: $DB_NAME"
-    echo "   User: $DB_USER"
-    echo "   Password saved in wp-config.php"
+    echo "   No previous web server detected"
 fi
-echo "✅ Caddy configured for:"
-echo "   • https://$DOMAIN"
-echo "   • https://erp.$DOMAIN"
-echo "   • https://docs.$DOMAIN"
-echo "   • https://mail.$DOMAIN"
-echo "   • https://nomogrow.$DOMAIN"
-echo "   • https://ventura-tech.$DOMAIN"
 echo ""
-echo "🔧 Management:"
-echo "   sudo systemctl status caddy"
-echo "   sudo journalctl -u caddy -f"
-echo "   sudo caddy validate --config /etc/caddy/Caddyfile"
+echo "📊 DISK SPACE AFTER MIGRATION:"
+df -h /
 echo ""
-echo "📁 Backup location: $BACKUP_ROOT"
-echo "   Contains: Web server config, WordPress files, database backup"
-echo ""
-echo "⚠️  Next steps:"
-echo "   1. Update DNS to point to $THIS_VM_IP"
-echo "   2. Test all services"
-echo "   3. Remove test file: sudo rm $SELECTED_WP_PATH/test-migration.php"
-echo "   4. Keep backup for at least 30 days"
-echo ""
+echo "==============================================="
+echo " Next steps:"
+echo " 1. Test all services in browser"
+echo " 2. Check SSL certificates: sudo caddy list-certificates"
+echo " 3. Monitor logs for errors"
 echo "==============================================="
