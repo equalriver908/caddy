@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===============================================
 # Migration Script: WordPress + PHP-FPM + Caddy
-# Migrates WordPress from Apache/Nginx to Caddy with Let's Encrypt SSL
+# Migrates WordPress from backup zip to Caddy with Let's Encrypt SSL
 # ===============================================
 
 set -e
@@ -11,7 +11,10 @@ set -e
 # -------------------
 DOMAIN="sahmcore.com.sa"
 ADMIN_EMAIL="a.saeed@$DOMAIN"
-WP_PATH="/var/www/html"          # The original WordPress path (no backup needed)
+WP_PATH="/var/www/html"          # The original WordPress path
+BACKUP_DIR="/home/sahm"          # Backup location
+ZIP_FILE="sahmcore.com.sa.zip"   # Website backup zip
+DB_DUMP="3478617_wpress0f72a664.sql"  # Database backup
 PHP_VERSION="8.3"
 PHP_SOCKET="/run/php/php${PHP_VERSION}-fpm.sock"
 WP_CONFIG="$WP_PATH/wp-config.php"
@@ -56,15 +59,17 @@ sudo systemctl disable apache2 nginx 2>/dev/null || true
 sudo systemctl mask apache2 nginx  # Ensure Apache and Nginx do not restart
 
 # -------------------
-# VERIFY AND RESTORE WORDPRESS FILES
+# RESTORE WEBSITE FILES
 # -------------------
-echo "[INFO] Verifying WordPress installation at $WP_PATH..."
+echo "[INFO] Restoring website from backup..."
 
-# Ensure that the WordPress path exists
+# Ensure the website directory exists
 if [ ! -d "$WP_PATH" ]; then
-    echo "[ERROR] WordPress path $WP_PATH does not exist!"
-    exit 1
+    sudo mkdir -p $WP_PATH
 fi
+
+# Unzip the website backup to the target directory
+sudo unzip -o $BACKUP_DIR/$ZIP_FILE -d $WP_PATH
 
 # Ensure correct permissions for the WordPress files
 sudo chown -R www-data:www-data $WP_PATH
@@ -75,9 +80,10 @@ sudo find $WP_PATH -type f -exec chmod 644 {} \;
 # RESTORE DATABASE CREDENTIALS FROM wp-config.php
 # -------------------
 echo "[INFO] Extracting database credentials from wp-config.php..."
-DB_NAME=$(grep "define('DB_NAME'" $WP_CONFIG | cut -d"'" -f4)
-DB_USER=$(grep "define('DB_USER'" $WP_CONFIG | cut -d"'" -f4)
-DB_PASSWORD=$(grep "define('DB_PASSWORD'" $WP_CONFIG | cut -d"'" -f4)
+DB_NAME="3478617_wpress0f72a664"
+DB_USER="3478617_wpress0f72a664"
+DB_PASSWORD="I9hqHCqkg5IGhUKZQYqpvjbMx5peIBgh"
+DB_HOST="localhost"  # Assuming the DB is on the same machine
 
 echo "[INFO] Using the following database credentials:"
 echo "Database Name: $DB_NAME"
@@ -95,10 +101,8 @@ export MYSQL_PWD=$DB_PASSWORD
 # If necessary, create the database (ensure the database exists in MySQL)
 sudo mysql -u root -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;"
 
-# Import the existing database dump (if applicable)
-# This assumes the original database is running and doesn't require restoring from an external file
-# Adjust if you have an actual database dump to restore
-sudo mysql -u root $DB_NAME < /var/www/html/backup/wordpress_db.sql
+# Import the database dump
+sudo mysql -u root $DB_NAME < $BACKUP_DIR/$DB_DUMP
 
 # -------------------
 # VERIFY wp-config.php
@@ -113,6 +117,7 @@ fi
 sed -i "s/database_name_here/$DB_NAME/" $WP_CONFIG
 sed -i "s/username_here/$DB_USER/" $WP_CONFIG
 sed -i "s/password_here/$DB_PASSWORD/" $WP_CONFIG
+sed -i "s/localhost/$DB_HOST/" $WP_CONFIG
 
 # Update site URL if necessary
 sed -i "s|define('WP_HOME', 'http://localhost');|define('WP_HOME', 'https://$DOMAIN');|" $WP_CONFIG
@@ -233,4 +238,16 @@ else
 fi
 
 # Check if PHP-FPM is running
-echo "[INFO] Checking if PHP-FPM is
+echo "[INFO] Checking if PHP-FPM is running..."
+if systemctl is-active --quiet php${PHP_VERSION}-fpm; then
+    echo "[INFO] PHP-FPM is running."
+else
+    echo "[ERROR] PHP-FPM is not running. Please check the installation."
+    exit 1
+fi
+
+# -------------------
+# FINAL STATUS
+# -------------------
+echo "[INFO] Migration script completed successfully!"
+echo "Your WordPress site should be accessible at https://$DOMAIN now."
